@@ -1,16 +1,14 @@
 from typing import Optional, List
 
-from examples.mlperf.rnnt.config import Config
-
 import sentencepiece as spm
 
 
 class Tokenizer:
-  def __init__(self, config:Config):
-    self.charset = config.tokenizer.get("labels")
-    self.use_sentpiece = config.tokenizer.get("sentpiece_model") is not None
+  def __init__(self, labels:List[str], sentpiece_model:Optional[str] = None):
+    self.charset = labels
+    self.use_sentpiece = sentpiece_model is not None
     if self.use_sentpiece:
-      self.sentpiece = spm.SentencePieceProcessor(model_file=config.tokenizer.get("sentpiece_model"))
+      self.sentpiece = spm.SentencePieceProcessor(model_file=sentpiece_model)
       self.num_labels = len(self.sentpiece)
     else:
       self.num_labels = len(self.charset)
