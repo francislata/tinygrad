@@ -2,12 +2,30 @@ import json
 import librosa
 import numpy as np
 import soundfile as sf
+from tqdm import tqdm
 
 from pathlib import Path
 from typing import Optional
 
+from examples.mlperf.rnnt.text.tokenizer import Tokenizer
+from examples.mlperf.rnnt.text import clean_text, punctuation_map
 from tinygrad.helpers import DEBUG, dtypes
 from tinygrad import Tensor
+
+
+def normalize_string(s, charset, punct_map):
+    """Normalizes string.
+
+    Example:
+      'call me at 8:00 pm!' -> 'call me at eight zero pm'
+    """
+    charset = set(charset)
+    try:
+      text = clean_text(s, ["english_cleaners"], punct_map).strip()
+      return ''.join([tok for tok in text if all(t in charset for t in tok)])
+    except:
+      print(f"WARNING: Normalizing failed: {s}")
+      return None
 
 
 class AudioSegment:
@@ -31,6 +49,15 @@ class AudioSegment:
     self._samples = samples
     self._sample_rate = sample_rate
     if self._samples.ndim >= 2: self._samples = np.mean(self._samples, 1)
+
+  def __eq__(self, other):
+    if type(other) is not type(self): return False
+    if self._sample_rate != other._sample_rate: return False
+    if self._samples.shape != other._samples.shape: return False
+    if np.any(self.samples != other._samples): return False
+    return True
+  
+  def __ne__(self, other): return not self.__eq__(other)
 
   @staticmethod
   def _convert_samples_to_float32(samples):
@@ -84,9 +111,12 @@ class AudioSegment:
     end_sample = int(round(end_time * self._sample_rate))
     self._samples = self._samples[start_sample:end_sample]
 
+
 class AudioDataset:
-  def __init__(self, data_dir:Path, manifest_names:str, min_duration:float = 0.1, max_duration:float = float("inf"), sample_rate:int = 16000, trim_silence:bool = False):
+  def __init__(self, data_dir:Path, manifest_names:str, tokenizer:Tokenizer, normalize_transcripts:bool = True, min_duration:float = 0.1, max_duration:float = float("inf"), sample_rate:int = 16000, trim_silence:bool = False):
     self.data_dir = data_dir
+    self.tokenizer = tokenizer
+    self.normalize_transcripts = normalize_transcripts
     self.min_duration = min_duration
     self.max_duration = max_duration
     self.sample_rate = sample_rate
@@ -94,6 +124,7 @@ class AudioDataset:
     self.samples = []
     self.duration = 0.0
     self.duration_filtered = 0.0
+    self.punctuation_map = punctuation_map(self.tokenizer.charset)
 
     manifest_paths = [data_dir / Path(name) for name in manifest_names.split(",") if len(name) > 0]
     for path in manifest_paths: self._load_manifest(path)
@@ -103,22 +134,19 @@ class AudioDataset:
     rn_index = np.random.randint(len(s["audio_filepath"]))
     duration = s["audio_duration"][rn_index] if "audio_duration" in s else 0
     offset = s.get("offset", 0)
-
-    if DEBUG >= 1: print(f"audio filepath: {s['audio_filepath']}")
-
+    if DEBUG >= 2: print(f"audio: {s['audio_filepath']}")
     segment = AudioSegment(s["audio_filepath"][rn_index], target_sr=self.sample_rate, offset=offset, duration=duration, trim=self.trim_silence)
-
-    # TODO: apply pertubations?
     segment = Tensor(segment.samples)
-    # TODO: need to tokenize "transcript" still
     return segment, Tensor(segment.shape[0], dtype=dtypes.int), Tensor(s["transcript"]), Tensor(len(s["transcript"]), dtype=dtypes.int)
     
   def __len__(self):
     return len(self.samples)
   
   def _load_manifest(self, path:Path):
+    if DEBUG >= 1: print(f"loading manifest file: {path}")
+
     with path.open(mode="r", encoding="utf-8") as fp: j = json.load(fp)
-    for i, s in enumerate(j):
+    for s in tqdm(j, desc="loading manifest"):
       s_max_duration = s["original_duration"]
 
       s["duration"] = s.pop("original_duration")
@@ -126,7 +154,14 @@ class AudioDataset:
         self.duration_filtered += s["duration"]
 
       tr = s.get("transcript", None) or self._load_transcript(Path(s["text_filepath"]))
-      # TODO: should we tokenize here?
+
+      if not isinstance(tr, str):
+        if DEBUG >= 1: print("skipping sample as transcript is not str")
+        self.duration_filtered += s["duration"]
+
+      if self.normalize_transcripts: tr = normalize_string(tr, self.tokenizer.charset, self.punctuation_map)
+
+      s["transcript"] = self.tokenizer.tokenize(tr)
 
       files = s.pop("files")
       # TODO: do speed pertubation
@@ -137,44 +172,7 @@ class AudioDataset:
       self.samples.append(s)
       self.duration += s["duration"]
 
-    if DEBUG >= 1: print(f"audio duration: {self.duration:.2f} / audio filtered duration: {self.duration_filtered:.2f}")
+    if DEBUG >= 2: print(f"audio duration: {self.duration:.2f} / audio filtered duration: {self.duration_filtered:.2f}")
 
   def _load_transcript(self, path:Path):
     with path.open(mode="r", encoding="utf-8") as fp: return fp.read().replace("\n", "")
-
-
-class AudioPipeline:#
-  def __init__(self, file_path:Path):
-    self.file_path = file_path
-
-
-class RnntIterator:
-  def __init__(self, batch_size):
-    self.batch_size = batch_size
-
-  def __iter__(self):
-    return self
-
-class LibriTTSDataset:
-  def __init__(self, root_dir:Path):
-    self.root_dir = root_dir
-
-  def __getitem__(self, idx):
-    raise NotImplementedError
-  
-
-class BatchSampler:
-  ...
-  
-
-class AudioDataLoader:
-  def __init__(self, dataset:LibriTTSDataset):
-    self.dataset = dataset
-
-  def __next__(self):
-    raise NotImplementedError
-  
-  def __iter__(self):
-    return self
-
-  
