@@ -29,6 +29,7 @@ def normalize_string(s, charset, punct_map):
 
 
 class AudioSegment:
+  # TODO: may need to do some support for speed_pertubations (i.e., randomly choosing sample rate)
   def __init__(self, filename:Path, target_sr:int = None, int_values:bool = False, offset:int = 0, duration:float = 0.0, trim:bool = False, trim_db:int = 60):
     with sf.SoundFile(filename, mode="r") as f:
       dtype = "int32" if int_values else "float32"
