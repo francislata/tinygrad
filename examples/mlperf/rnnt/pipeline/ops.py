@@ -106,7 +106,6 @@ class FilterbankOp:
 class SpecAugmentOp:
   def __init__(
     self,
-    optim_level,
     freq_masks:int = 0,
     min_freq:int = 0,
     max_freq:Union[int, float] = 10,
