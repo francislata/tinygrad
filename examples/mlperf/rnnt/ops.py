@@ -1,5 +1,6 @@
 import librosa
 import math
+import torch
 
 from typing import Optional, Tuple, Union
 
@@ -60,12 +61,13 @@ class FilterbankOp:
     window_size:float,
     window_stride:float,
     n_filt:int,
-    lowfreq:float,
     normalize:str,
-    highfreq:Optional[float],
-    preemph:Optional[float],
+    preemph:Optional[float] = 0.97,
+    lowfreq:float = 0,
+    highfreq:Optional[float] = None,
     log:bool = True,
-    n_fft:Optional[int] = None
+    n_fft:Optional[int] = None,
+    window:Optional[str] = "hann"
   ):
     self.dither = dither
     self.preemph = preemph
@@ -74,13 +76,23 @@ class FilterbankOp:
     self.win_length = int(sample_rate * window_size)
     self.hop_length = int(sample_rate * window_stride)
     self.n_fft = n_fft or 2 ** math.ceil(math.log2(self.win_length))
-    self.fb = Tensor(librosa.filters.mel(sample_rate, self.n_fft, n_mels=n_filt, fmin=lowfreq, fmax=highfreq), dtype=dtypes.float).unsqueeze(0)
+    self.fb = Tensor(librosa.filters.mel(sr=sample_rate, n_fft=self.n_fft, n_mels=n_filt, fmin=lowfreq, fmax=highfreq), dtype=dtypes.float).unsqueeze(0)
+
+    torch_windows = {
+      'hann': torch.hann_window,
+      'hamming': torch.hamming_window,
+      'blackman': torch.blackman_window,
+      'bartlett': torch.bartlett_window,
+      'none': None,
+    }
+    window_fn = torch_windows.get(window, None)
+    self.window = window_fn(self.win_length, periodic=False) if window_fn is not None else None
 
   def __call__(self, x:Tensor, x_lens:Tensor) -> Tuple[Tensor, Tensor]:
     Tensor.no_grad = True
 
     if self.dither > 0:
-      x += self.dither * Tensor.randn(x.shape)
+      x += self.dither * Tensor.randn(*x.shape, dtype=x.dtype, device=x.device)
 
     if self.preemph is not None:
       x = Tensor.cat(x[:, 0].unsqueeze(1), x[:, 1:] - self.preemph * x[:, :-1], dim=1)
@@ -92,6 +104,7 @@ class FilterbankOp:
 
     if self.log: x = (x + 1e-20).log()
 
+    import pdb; pdb.set_trace()
     x = _normalize_batch(x, x_lens, normalize_type=self.normalize)
 
     Tensor.no_grad = False
@@ -99,8 +112,8 @@ class FilterbankOp:
     return x, x_lens
 
   def _stft(self, x:Tensor) -> Tensor:
-    stft = librosa.stft(x.numpy(), n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.win_length)
-    return Tensor(stft)
+    stft = torch.stft(torch.tensor(x.numpy()), n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.win_length, window=self.window, return_complex=False)
+    return Tensor(stft.numpy())
 
 
 class SpecAugmentOp:
@@ -175,4 +188,12 @@ class FrameSplicingOp:
     if self.frame_stacking > 1 or self.frame_subsampling > 1:
       x, x_lens = _stack_subsample_frames(x, x_lens, self.frame_stacking, self.frame_subsampling)
     return x, x_lens
+  
 
+class ComposeOp:
+  def __init__(self, ops):
+    self.ops = ops
+
+  def __call__(self, x:Tensor, x_lens:Tensor) -> Tuple[Tensor, Tensor]:
+    for op in self.ops: x, x_lens = op(x, x_lens)
+    return x, x_lens
