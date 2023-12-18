@@ -3,7 +3,7 @@ import numpy as np
 from tqdm import tqdm
 
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 
 from examples.mlperf.rnnt.data.audio import AudioSegment
 from examples.mlperf.rnnt.text.tokenizer import Tokenizer
@@ -60,27 +60,9 @@ class AudioDataset:
 
   def __getitem__(self, index):
     s = self.samples[index]
-    rn_index = np.random.randint(len(s["audio_filepath"]))
-    duration = s["audio_duration"][rn_index] if "audio_duration" in s else 0
-    offset = s.get("offset", 0)
-    if DEBUG >= 2: print(f"audio: {s['audio_filepath']}")
-    if self.speed_perturbations is not None:
-      if DEBUG >= 2: print("applying speed perturbation")
-      speed_perturbation_coeffs = Tensor.uniform(
-        (1,),
-        low=self.speed_perturbations["min_rate"],
-        high=self.speed_perturbations["max_rate"]
-      )
-      resample_coeffs = speed_perturbation_coeffs.item() * self.sample_rate
-    else:
-      if DEBUG >= 2: print("no speed perturbation")
-      resample_coeffs = self.sample_rate
-    segment = AudioSegment(s["audio_filepath"][rn_index], target_sr=resample_coeffs, offset=offset, duration=duration, trim=self.trim_silence)
-    segment = Tensor(segment.samples)
-    return segment, Tensor(segment.shape[0], dtype=dtypes.int), Tensor(s["transcript"]), Tensor(len(s["transcript"]), dtype=dtypes.int)
+    return [self._prepare_item(cur_s) for cur_s in s]
     
-  def __len__(self):
-    return len(self.samples)
+  def __len__(self): return len(self.samples)
   
   def _load_manifest(self, path:Path):
     if DEBUG >= 1: print(f"loading manifest file: {path}")
@@ -117,3 +99,23 @@ class AudioDataset:
 
   def _load_transcript(self, path:Path):
     with path.open(mode="r", encoding="utf-8") as fp: return fp.read().replace("\n", "")
+
+  def _prepare_item(self, s:Dict) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    rn_index = np.random.randint(len(s["audio_filepath"]))
+    duration = s["audio_duration"][rn_index] if "audio_duration" in s else 0
+    offset = s.get("offset", 0)
+    if DEBUG >= 2: print(f"audio: {s['audio_filepath']}")
+    if self.speed_perturbations is not None:
+      if DEBUG >= 2: print("applying speed perturbation")
+      speed_perturbation_coeffs = Tensor.uniform(
+        (1,),
+        low=self.speed_perturbations["min_rate"],
+        high=self.speed_perturbations["max_rate"]
+      )
+      resample_coeffs = speed_perturbation_coeffs.item() * self.sample_rate
+    else:
+      if DEBUG >= 2: print("no speed perturbation")
+      resample_coeffs = self.sample_rate
+    segment = AudioSegment(s["audio_filepath"][rn_index], target_sr=resample_coeffs, offset=offset, duration=duration, trim=self.trim_silence)
+    segment = Tensor(segment.samples)
+    return segment, Tensor(segment.shape[0], dtype=dtypes.int), Tensor(s["transcript"]), Tensor(len(s["transcript"]), dtype=dtypes.int)

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import yaml
 
-def load(filepath:Path, max_duration=None):
+def load(filepath:Path):
   with filepath.open("r") as fp:
     config = yaml.safe_load(fp)
 

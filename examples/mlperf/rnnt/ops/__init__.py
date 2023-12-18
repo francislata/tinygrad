@@ -10,21 +10,21 @@ from tinygrad.helpers import dtypes
 
 def _normalize_batch(x:Tensor, x_lens:Tensor, normalize_type:str):
   if normalize_type == "per_feature":
-    mean = Tensor.zeros(x.shape(0), x.shape(1), dtype=x.dtype, device=x.device)
-    std = Tensor.zeros(x.shape(0), x.shape(1), dtype=x.dtype, device=x.device)
+    mean = Tensor.zeros(x.shape[0], x.shape[1], dtype=x.dtype, device=x.device)
+    std = Tensor.zeros(x.shape[0], x.shape[1], dtype=x.dtype, device=x.device)
 
     for i in range(x.shape[0]):
-      mean[i, :] = x[i, :, :x_lens[i]].mean(axis=1)
-      std[i, :] = x[i, :, :x_lens[i]].std(axis=1)
+      mean[i, :] = x[i, :, :x_lens[i].item()].mean(axis=1)
+      std[i, :] = x[i, :, :x_lens[i].item()].std(axis=1)
 
     return (x - mean.unsqueeze(2)) / (std.unsqueeze(2) + 1e-5)
   elif normalize_type == "all_features":
-    mean = Tensor.zeros(x.shape(0), dtype=x.dtype, device=x.device)
-    std = Tensor.zeros(x.shape(0), dtype=x.dtype, device=x.device)
+    mean = Tensor.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+    std = Tensor.zeros(x.shape[0], dtype=x.dtype, device=x.device)
 
     for i in range(x.shape[0]):
-      mean[i] = x[i, :, :x_lens[i]].mean()
-      std[i] = x[i, :, :x_lens[i]].std()
+      mean[i] = x[i, :, :x_lens[i].item()].mean()
+      std[i] = x[i, :, :x_lens[i].item()].std()
 
     return (x - mean.reshape(-1, 1, 1)) / (std.reshape(-1, 1, 1) + 1e-5)
 
@@ -104,7 +104,6 @@ class FilterbankOp:
 
     if self.log: x = (x + 1e-20).log()
 
-    import pdb; pdb.set_trace()
     x = _normalize_batch(x, x_lens, normalize_type=self.normalize)
 
     Tensor.no_grad = False

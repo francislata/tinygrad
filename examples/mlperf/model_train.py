@@ -14,8 +14,21 @@ def train_unet3d():
   pass
 
 def train_rnnt():
-  # TODO: RNN-T
-  pass
+  from pathlib import Path
+
+  from examples.mlperf.rnnt.data.dataloader import audio_dataloader
+  from examples.mlperf.rnnt.ops import FilterbankOp
+  from examples.mlperf.rnnt.train import RNNTTrainer
+
+  batch_size = getenv("BS", 1)
+  config_filepath = Path(getenv("CONFIG", ""))
+  data_dir = Path(getenv("DATA_DIR", ""))
+  manifest_names = getenv("MANIFEST_NAMES", "")
+  num_buckets = getenv("NUM_BUCKETS", 1)
+
+  trainer = RNNTTrainer(config_filepath, data_dir, manifest_names, num_buckets=num_buckets)
+  for batch in audio_dataloader(trainer.dataset, trainer.sampler, batch_size):
+    trainer.train_step(*(batch[0]))
 
 def train_bert():
   # TODO: BERT
