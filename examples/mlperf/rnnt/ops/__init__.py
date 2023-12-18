@@ -112,7 +112,14 @@ class FilterbankOp:
     return x, x_lens
 
   def _stft(self, x:Tensor) -> Tensor:
-    stft = torch.stft(torch.tensor(x.numpy()), n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.win_length, window=self.window, return_complex=False)
+    stft = torch.stft(
+      torch.tensor(x.numpy()),
+      n_fft=self.n_fft,
+      hop_length=self.hop_length,
+      win_length=self.win_length,
+      window=self.window,
+      return_complex=False
+    )
     return Tensor(stft.numpy())
 
 

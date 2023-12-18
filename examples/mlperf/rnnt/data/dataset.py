@@ -5,7 +5,7 @@ from tqdm import tqdm
 from pathlib import Path
 from typing import Optional, Dict
 
-from examples.mlperf.rnnt.audio import AudioSegment
+from examples.mlperf.rnnt.data.audio import AudioSegment
 from examples.mlperf.rnnt.text.tokenizer import Tokenizer
 from examples.mlperf.rnnt.text import clean_text, punctuation_map
 from tinygrad.helpers import DEBUG, dtypes
