@@ -25,6 +25,7 @@ def train_rnnt():
   data_dir = Path(getenv("DATA_DIR", ""))
   manifest_names = getenv("MANIFEST_NAMES", "")
   num_buckets = getenv("NUM_BUCKETS", 1)
+  num_epochs = getenv("NUM_EPOCHS", 1)
 
   trainer = RNNTTrainer(config_filepath, data_dir, manifest_names, num_buckets=num_buckets)
   for batch in audio_dataloader(trainer.dataset, trainer.sampler, batch_size):
