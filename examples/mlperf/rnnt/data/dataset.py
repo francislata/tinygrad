@@ -60,7 +60,24 @@ class AudioDataset:
 
   def __getitem__(self, index):
     s = self.samples[index]
-    return [self._prepare_item(cur_s) for cur_s in s]
+    rn_index = np.random.randint(len(s["audio_filepath"]))
+    duration = s["audio_duration"][rn_index] if "audio_duration" in s else 0
+    offset = s.get("offset", 0)
+    if DEBUG >= 2: print(f"audio: {s['audio_filepath']}")
+    if self.speed_perturbations is not None:
+      if DEBUG >= 2: print("applying speed perturbation")
+      speed_perturbation_coeffs = Tensor.uniform(
+        (1,),
+        low=self.speed_perturbations["min_rate"],
+        high=self.speed_perturbations["max_rate"]
+      )
+      resample_coeffs = speed_perturbation_coeffs.item() * self.sample_rate
+    else:
+      if DEBUG >= 2: print("no speed perturbation")
+      resample_coeffs = self.sample_rate
+    segment = AudioSegment(s["audio_filepath"][rn_index], target_sr=resample_coeffs, offset=offset, duration=duration, trim=self.trim_silence)
+    segment = Tensor(segment.samples)
+    return segment, Tensor(segment.shape[0], dtype=dtypes.int), Tensor(s["transcript"]), Tensor(len(s["transcript"]), dtype=dtypes.int)
     
   def __len__(self): return len(self.samples)
   

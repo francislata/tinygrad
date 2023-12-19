@@ -27,9 +27,11 @@ def train_rnnt():
   num_buckets = getenv("NUM_BUCKETS", 1)
   num_epochs = getenv("NUM_EPOCHS", 1)
 
-  trainer = RNNTTrainer(config_filepath, data_dir, manifest_names, num_buckets=num_buckets)
-  for batch in audio_dataloader(trainer.dataset, trainer.sampler, batch_size):
-    trainer.train_step(*(batch[0]))
+  trainer = RNNTTrainer(config_filepath, data_dir, manifest_names, batch_size=batch_size, num_buckets=num_buckets)
+  for epoch in range(1, num_epochs + 1):
+    trainer.sampler.set_epoch(epoch)
+
+    for batch in audio_dataloader(trainer.dataset, trainer.sampler): pass
 
 def train_bert():
   # TODO: BERT
