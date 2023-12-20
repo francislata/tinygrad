@@ -61,7 +61,7 @@ class BatchSampler:
     batch = [0] * self.batch_size
     idx_in_batch = 0
     for idx in self.sampler:
-      batch[idx_in_batch] = idx.item()
+      batch[idx_in_batch] = idx
       idx_in_batch += 1
       if idx_in_batch == self.batch_size:
         yield batch

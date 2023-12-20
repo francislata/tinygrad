@@ -25,7 +25,5 @@ class RNNTTrainer:
 
     # TODO: make train ops here
 
-  def train_step(self, x:Tensor, x_lens:Tensor, y:Tensor, y_lens:Tensor, epoch:int):
-    import pdb; pdb.set_trace
-    x, x_lens = self.ops(x.unsqueeze(0), x_lens.unsqueeze(0))
-    import pdb; pdb.set_trace
+  def train_step(self, x:Tensor, x_lens:Tensor, y:Tensor, y_lens:Tensor) -> Tensor:
+    x, x_lens = self.ops(x, x_lens)

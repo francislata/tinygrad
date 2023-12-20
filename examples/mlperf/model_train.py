@@ -17,7 +17,6 @@ def train_rnnt():
   from pathlib import Path
 
   from examples.mlperf.rnnt.data.dataloader import audio_dataloader
-  from examples.mlperf.rnnt.ops import FilterbankOp
   from examples.mlperf.rnnt.train import RNNTTrainer
 
   batch_size = getenv("BS", 1)
@@ -29,9 +28,12 @@ def train_rnnt():
 
   trainer = RNNTTrainer(config_filepath, data_dir, manifest_names, batch_size=batch_size, num_buckets=num_buckets)
   for epoch in range(1, num_epochs + 1):
+    print(f"[training] epoch {epoch}")
+
     trainer.sampler.set_epoch(epoch)
 
-    for batch in audio_dataloader(trainer.dataset, trainer.sampler): pass
+    for batch in audio_dataloader(trainer.dataset, trainer.sampler, batch_size):
+      trainer.train_step(*batch)
 
 def train_bert():
   # TODO: BERT

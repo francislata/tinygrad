@@ -76,8 +76,7 @@ class AudioDataset:
       if DEBUG >= 2: print("no speed perturbation")
       resample_coeffs = self.sample_rate
     segment = AudioSegment(s["audio_filepath"][rn_index], target_sr=resample_coeffs, offset=offset, duration=duration, trim=self.trim_silence)
-    segment = Tensor(segment.samples)
-    return segment, Tensor(segment.shape[0], dtype=dtypes.int), Tensor(s["transcript"]), Tensor(len(s["transcript"]), dtype=dtypes.int)
+    return segment.samples, segment.num_samples, s["transcript"], len(s["transcript"])
     
   def __len__(self): return len(self.samples)
   
