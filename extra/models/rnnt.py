@@ -4,6 +4,7 @@ from tinygrad.nn import Linear, Embedding
 from tinygrad.helpers import fetch
 import numpy as np
 from pathlib import Path
+from typing import Tuple, Optional, Union
 
 
 class RNNT:
@@ -13,11 +14,11 @@ class RNNT:
     self.joint = Joint(vocab_size, pred_hidden_size, enc_hidden_size, joint_hidden_size, dropout)
 
   @TinyJit
-  def __call__(self, x, y, hc=None):
-    f, _ = self.encoder(x, None)
+  def __call__(self, x, y, hc=None, x_lens:Optional[Tensor] = None) -> Union[Tuple[Tensor, Tensor], Tensor]:
+    f, x_lens = self.encoder(x, x_lens)
     g, _ = self.prediction(y, hc, Tensor.ones(1, requires_grad=False))
     out = self.joint(f, g)
-    return out.realize()
+    return ((out.realize(), x_lens.realize()) if x_lens is not None else out.realize())
 
   def decode(self, x, x_lens):
     logits, logit_lens = self.encoder(x, x_lens)

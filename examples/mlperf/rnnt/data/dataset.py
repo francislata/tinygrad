@@ -67,7 +67,7 @@ class AudioDataset:
     if self.speed_perturbations is not None:
       if DEBUG >= 2: print("applying speed perturbation")
       speed_perturbation_coeffs = Tensor.uniform(
-        (1,),
+        1,
         low=self.speed_perturbations["min_rate"],
         high=self.speed_perturbations["max_rate"]
       )

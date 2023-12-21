@@ -16,13 +16,14 @@ for file in $(find * | grep flac); do ffmpeg -i $file -ar 16k "$(dirname $file)/
 Then this [file](https://github.com/mlcommons/inference/blob/master/speech_recognition/rnnt/dev-clean-wav.json) has to also be put in `extra/datasets/librispeech`.
 """
 BASEDIR = pathlib.Path(__file__).parent / "librispeech"
-with open(BASEDIR / "dev-clean-wav.json") as f:
-  ci = json.load(f)
+# TODO: fix this if importing certain functions
+# with open(BASEDIR / "dev-clean-wav.json") as f:
+#   ci = json.load(f)
 
 FILTER_BANK = np.expand_dims(librosa.filters.mel(sr=16000, n_fft=512, n_mels=80, fmin=0, fmax=8000), 0)
 WINDOW = librosa.filters.get_window("hann", 320)
 
-def feature_extract(x, x_lens):
+def feature_extract(x, x_lens, apply_splicing:bool = True):
   x_lens = np.ceil((x_lens / 160) / 3).astype(np.int32)
 
   # pre-emphasis
@@ -42,12 +43,7 @@ def feature_extract(x, x_lens):
   x = np.log(x + 1e-20)
 
   # feature splice
-  seq = [x]
-  for i in range(1, 3):
-    tmp = np.zeros_like(x)
-    tmp[:, :, :-i] = x[:, :, i:]
-    seq.append(tmp)
-  features = np.concatenate(seq, axis=1)[:, :, ::3]
+  features = splice(x) if apply_splicing else x
 
   # normalize
   features_mean = np.zeros((features.shape[0], features.shape[1]), dtype=np.float32)
@@ -59,6 +55,14 @@ def feature_extract(x, x_lens):
   features = (features - np.expand_dims(features_mean, 2)) / np.expand_dims(features_std, 2)
 
   return features.transpose(2, 0, 1), x_lens.astype(np.float32)
+
+def splice(x:np.ndarray) -> np.ndarray:
+  seq = [x]
+  for i in range(1, 3):
+    tmp = np.zeros_like(x)
+    tmp[:, :, :-i] = x[:, :, i:]
+    seq.append(tmp)
+  return np.concatenate(seq, axis=1)[:, :, ::3]
 
 def load_wav(file):
   sample = soundfile.read(file)[0].astype(np.float32)
