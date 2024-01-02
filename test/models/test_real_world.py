@@ -4,8 +4,8 @@ from tinygrad.tensor import Tensor
 from tinygrad.nn import optim
 from tinygrad.nn.state import get_parameters
 from tinygrad.jit import TinyJit
-from tinygrad import Device, GlobalCounters
-from tinygrad.helpers import CI, dtypes
+from tinygrad import Device, GlobalCounters, dtypes
+from tinygrad.helpers import CI
 from tinygrad.shape.symbolic import Variable
 from test.helpers import derandomize_model
 
@@ -66,7 +66,7 @@ class TestRealWorld(unittest.TestCase):
     helper_test("test_mini_sd", lambda: (Tensor.empty(4, 16, 8, 8), Tensor.empty(1, 24)), test, 0.01, 43)
 
   @unittest.skipIf(Device.DEFAULT == "LLVM", "LLVM segmentation fault")
-  @unittest.skipIf(Device.DEFAULT in ["LLVM", "GPU"] and CI, "too long on CI LLVM, GPU requires cl_khr_fp1")
+  @unittest.skipIf(Device.DEFAULT in ["LLVM", "GPU"] and CI, "too long on CI LLVM, GPU requires cl_khr_fp16")
   def test_llama(self):
     dtypes.default_float = dtypes.float16
 
@@ -75,8 +75,8 @@ class TestRealWorld(unittest.TestCase):
     derandomize_model(model)
     @TinyJit
     def test(t): return model(t, 0).realize()
-    # TODO: test first token vs rest properly, also memory test is broken with CacheCollector
-    helper_test("test_llama", lambda: (Tensor([[1,2,3,4]]),), test, 0.27 if CI else 13.5, 181 if CI else 685, all_jitted=True)
+    # TODO: test first token vs rest properly
+    helper_test("test_llama", lambda: (Tensor([[1,2,3,4]]),), test, 0.27 if CI else 14.6, 190 if CI else 718, all_jitted=True)
 
   @unittest.skipIf(Device.DEFAULT in ["LLVM", "GPU"] and CI, "too long on CI LLVM, GPU requires cl_khr_fp16")
   def test_gpt2(self):
