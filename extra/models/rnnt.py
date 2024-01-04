@@ -13,7 +13,7 @@ class RNNT:
     self.prediction = Prediction(vocab_size, pred_hidden_size, pred_layers, dropout)
     self.joint = Joint(vocab_size, pred_hidden_size, enc_hidden_size, joint_hidden_size, dropout)
 
-  @TinyJit
+  # @TinyJit
   def __call__(self, x, y, hc=None, x_lens:Optional[Tensor] = None) -> Union[Tuple[Tensor, Tensor], Tensor]:
     f, x_lens = self.encoder(x, x_lens)
     g, _ = self.prediction(y, hc, Tensor.ones(1, requires_grad=False))
@@ -52,7 +52,7 @@ class RNNT:
         added += 1
     return labels
 
-  @TinyJit
+  # @TinyJit
   def _pred_joint(self, logit, label, hc, mask):
     g, hc = self.prediction(label, hc, mask)
     j = self.joint(logit, g)[0]
@@ -125,7 +125,7 @@ class LSTM:
     self.cells = [LSTMCell(input_size, hidden_size, dropout) if i == 0 else LSTMCell(hidden_size, hidden_size, dropout if i != layers - 1 else 0) for i in range(layers)]
 
   def __call__(self, x, hc):
-    @TinyJit
+    # @TinyJit
     def _do_step(x_, hc_):
       return self.do_step(x_, hc_)
 
@@ -179,8 +179,14 @@ class Prediction:
     self.emb = Embedding(vocab_size - 1, hidden_size)
     self.rnn = LSTM(hidden_size, hidden_size, layers, dropout)
 
-  def __call__(self, x, hc, m):
+  def __call__(self, x, hc, m, add_sos=True):
     emb = self.emb(x) * m
+    if add_sos:
+      B, _, H = emb.shape
+      start = Tensor.zeros(B, 1, H, dtype=emb.dtype, device=emb.device)
+      emb = start.cat(emb, dim=1)
+    else:
+      start = None
     x_, hc = self.rnn(emb.transpose(0, 1), hc)
     return x_.transpose(0, 1), hc
 

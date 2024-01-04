@@ -15,6 +15,7 @@ def train_unet3d():
 
 def train_rnnt():
   from pathlib import Path
+  from tqdm import tqdm
 
   from examples.mlperf.rnnt.data.dataloader import audio_dataloader
   from examples.mlperf.rnnt.train import RNNTTrainer
@@ -32,8 +33,9 @@ def train_rnnt():
 
     trainer.sampler.set_epoch(epoch)
 
-    for batch in audio_dataloader(trainer.dataset, trainer.sampler, batch_size):
-      trainer.train_step(*batch)
+    for batch in (t := tqdm(audio_dataloader(trainer.dataset, trainer.sampler, batch_size))):
+      loss = trainer.train_step(*batch)
+      t.set_description(desc=f"loss: {loss.numpy():6.2f}")
 
 def train_bert():
   # TODO: BERT

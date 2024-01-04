@@ -8,10 +8,10 @@ from examples.mlperf.rnnt.data.sampler import BucketingSampler
 from examples.mlperf.rnnt.loss import TransducerLoss
 from examples.mlperf.rnnt.text.tokenizer import Tokenizer
 from extra.models.rnnt import RNNT
-from tinygrad import Tensor
+from tinygrad import Tensor, nn
 
 class RNNTTrainer:
-  def __init__(self, config_filepath:Path, data_dir:Path, manifest_names:List[str], batch_size:int = 128, num_buckets:int = 1):
+  def __init__(self, config_filepath:Path, data_dir:Path, manifest_names:List[str], batch_size:int = 128, num_buckets:int = 1, lr:float = 4e-3, weight_decay:float=1e-3, eps:float = 1e-9):
     self.config = load(config_filepath)
 
     self.tokenizer = Tokenizer(self.config["tokenizer"]["labels"], sentpiece_model=self.config["tokenizer"]["sentpiece_model"])
@@ -30,14 +30,15 @@ class RNNTTrainer:
       PermuteAudioOp()
     ])
     self.model = RNNT(vocab_size=self.tokenizer.num_labels + 1, pred_hidden_size=512) # TODO: take RNNT config from config yaml
-    self.loss_fn = TransducerLoss(self.tokenizer.num_labels)
-    # TODO: setup optimizer
+    self.optim = nn.optim.LAMB(nn.state.get_parameters(self.model), lr=lr, eps=eps, wd=weight_decay)
 
-  def train_step(self, x:Tensor, x_lens:Tensor, y:Tensor, y_lens:Tensor):
+  def train_step(self, x:Tensor, x_lens:Tensor, y:Tensor, y_lens:Tensor) -> Tensor:
     x, x_lens = self.train_ops(x, x_lens)
     y_, y_lens_ = self.model(x, y, x_lens=x_lens)
     
-    # TODO: reset optimizer
-    loss = self.loss_fn(y_, y_lens_, y, y_lens).realize()
+    self.optim.zero_grad()
+    loss = TransducerLoss.apply(y_.softmax(axis=3), y)
     loss.backward()
-    # TODO: optimizer step
+    self.optim.step()
+
+    return loss.realize()
