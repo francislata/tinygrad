@@ -1,8 +1,7 @@
 import numpy as np
 
 from examples.mlperf.rnnt.data.dataset import AudioDataset
-from tinygrad import Tensor
-from tinygrad.helpers import dtypes
+from tinygrad import Tensor, dtypes
 
 
 class BucketingSampler:

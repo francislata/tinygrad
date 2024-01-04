@@ -2,8 +2,7 @@ from typing import Tuple, List
 
 from examples.mlperf.rnnt.data.dataset import AudioDataset
 from examples.mlperf.rnnt.data.sampler import BucketingSampler, BatchSampler
-from tinygrad import Tensor
-from tinygrad.helpers import dtypes
+from tinygrad import Tensor, dtypes
 
 
 def _collate_fn(batch:List[Tensor]) -> Tuple[Tensor, Tensor, Tensor, Tensor]:

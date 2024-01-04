@@ -3,8 +3,7 @@ import numpy as np
 from typing import Tuple, Union
 
 from extra.datasets.librispeech import feature_extract, splice
-from tinygrad import Tensor
-from tinygrad.helpers import dtypes
+from tinygrad import Tensor, dtypes
 
 
 def _stack_subsample_frames(x:Tensor, x_lens:Tensor, stacking:int, subsampling:int) -> Tuple[Tensor, Tensor]:

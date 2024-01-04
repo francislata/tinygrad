@@ -8,8 +8,8 @@ from typing import Optional, Dict, Tuple
 from examples.mlperf.rnnt.data.audio import AudioSegment
 from examples.mlperf.rnnt.text.tokenizer import Tokenizer
 from examples.mlperf.rnnt.text import clean_text, punctuation_map
-from tinygrad.helpers import DEBUG, dtypes
-from tinygrad import Tensor
+from tinygrad.helpers import DEBUG
+from tinygrad import Tensor, dtypes
 
 
 def normalize_string(s, charset, punct_map):
