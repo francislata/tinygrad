@@ -14,3 +14,8 @@ def sigmoid_focal_loss(inputs:Tensor, targets:Tensor, alpha:float = 0.25, gamma:
   if reduction == "mean": loss = loss.mean()
   elif reduction == "sum": loss = loss.sum()
   return loss
+
+def l1_loss(inputs:Tensor, targets:Tensor, reduction:str="mean") -> Tensor:
+  loss = (inputs - targets).abs()
+  if reduction == "mean": return loss.mean()
+  elif reduction == "sum": return loss.sum()
