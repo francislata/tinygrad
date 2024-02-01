@@ -112,10 +112,10 @@ def eval_retinanet():
     dat = Tensor(x.astype(np.float32))
     mt = time.perf_counter()
     if dat.shape[0] == bs:
-      outs = mdlrun(dat).numpy()
+      outs =  mdl(input_fixup(dat), targets=targets).numpy()
     else:
       mdlrun.jit_cache = None
-      outs =  mdl(input_fixup(dat)).numpy()
+      outs =  mdl(input_fixup(dat), targets=targets).numpy()
     et = time.perf_counter()
     predictions = mdl.postprocess_detections(outs, input_size=dat.shape[1:3], orig_image_sizes=[t["image_size"] for t in targets])
     ext = time.perf_counter()

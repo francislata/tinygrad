@@ -1,8 +1,12 @@
 import math
+from tinygrad import Tensor
 from tinygrad.helpers import flatten, get_child
+from typing import List
 import tinygrad.nn as nn
 from extra.models.resnet import ResNet
+from examples.mlperf.retinanet.losses import sigmoid_focal_loss
 import numpy as np
+import torch
 
 def nms(boxes, scores, thresh=0.5):
   x1, y1, x2, y2 = np.rollaxis(boxes, 1)
@@ -48,6 +52,11 @@ def generate_anchors(input_size, grid_sizes, scales, aspect_ratios):
     anchors.append((shifts[:, None] + base_anchors[None, :]).reshape(-1, 4))
   return anchors
 
+def _sum(x:List[Tensor]) -> Tensor:
+  res = x[0]
+  for i in x[1:]: res += i
+  return res
+
 class RetinaNet:
   def __init__(self, backbone: ResNet, num_classes=264, num_anchors=9, scales=None, aspect_ratios=None):
     assert isinstance(backbone, ResNet)
@@ -60,8 +69,10 @@ class RetinaNet:
     self.head = RetinaHead(self.backbone.out_channels, num_anchors=num_anchors, num_classes=num_classes)
     self.anchor_gen = lambda input_size: generate_anchors(input_size, self.backbone.compute_grid_sizes(input_size), scales, aspect_ratios)
 
-  def __call__(self, x):
-    return self.forward(x)
+  def __call__(self, x, targets=None):
+    return self.compute_loss(targets, self.forward(x))
+    # return self.compute_loss(targets, self.forward(x)) if Tensor.training else self.forward(x)
+
   def forward(self, x):
     return self.head(self.backbone(x))
 
@@ -79,6 +90,10 @@ class RetinaNet:
       dat = v.detach().numpy()
       assert obj.shape == dat.shape, (k, obj.shape, dat.shape)
       obj.assign(dat)
+
+  def compute_loss(self, targets, head_outputs):
+    anchors = self.anchor_gen((800, 800))
+    import pdb; pdb.set_trace()
 
   # predictions: (BS, (H1W1+...+HmWm)A, 4 + K)
   def postprocess_detections(self, predictions, input_size=(800, 800), image_sizes=None, orig_image_sizes=None, score_thresh=0.05, topk_candidates=1000, nms_thresh=0.5):
@@ -145,21 +160,67 @@ class RetinaNet:
     return detections
 
 class ClassificationHead:
+  BETWEEN_THRESHOLDS = - 2 # TODO: use Matcher instead
+
   def __init__(self, in_channels, num_anchors, num_classes):
     self.num_classes = num_classes
     self.conv = flatten([(nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1), lambda x: x.relu()) for _ in range(4)])
     self.cls_logits = nn.Conv2d(in_channels, num_anchors * num_classes, kernel_size=3, padding=1)
+
   def __call__(self, x):
     out = [self.cls_logits(feat.sequential(self.conv)).permute(0, 2, 3, 1).reshape(feat.shape[0], -1, self.num_classes) for feat in x]
     return out[0].cat(*out[1:], dim=1).sigmoid()
+
+  # TODO: need to test this
+  def compute_loss(self, targets, head_outputs, matched_idxs):
+    losses = []
+
+    cls_logits = head_outputs["cls_logits"]
+
+    for targets_per_image, cls_logits_per_image, matched_idxs_per_image in zip(targets, cls_logits, matched_idxs):
+      foreground_idxs_per_image = matched_idxs_per_image >= 0
+      num_foreground = foreground_idxs_per_image.sum()
+
+      gt_classes_target = Tensor.zeros_like(cls_logits_per_image)
+      # TODO: might need to use where here
+      gt_classes_target[foreground_idxs_per_image, targets_per_image["labels"][matched_idxs_per_image[foreground_idxs_per_image]]] = 1.0
+
+      valid_idxs_per_image = matched_idxs_per_image != self.BETWEEN_THRESHOLDS
+
+      losses.append(
+        sigmoid_focal_loss(
+          cls_logits_per_image[valid_idxs_per_image],
+          gt_classes_target[valid_idxs_per_image],
+          reduction="sum"
+        ) / max(1, num_foreground)
+      )
+
+    return _sum(losses) / len(losses)
 
 class RegressionHead:
   def __init__(self, in_channels, num_anchors):
     self.conv = flatten([(nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1), lambda x: x.relu()) for _ in range(4)])
     self.bbox_reg = nn.Conv2d(in_channels, num_anchors * 4, kernel_size=3, padding=1)
+
   def __call__(self, x):
     out = [self.bbox_reg(feat.sequential(self.conv)).permute(0, 2, 3, 1).reshape(feat.shape[0], -1, 4) for feat in x]
     return out[0].cat(*out[1:], dim=1)
+  
+  def compute_loss(self, targets, head_outputs, anchors, matched_idxs):
+    losses = []
+    bbox_regression = head_outputs["bbox_regression"]
+
+    for targets_per_image, bbox_regression_per_image, anchors_per_image, matched_idxs_per_image in zip(targets, bbox_regression, anchors, matched_idxs):
+      # TODO: verify this
+      foreground_idxs_per_image = (matched_idxs_per_image >= 0).where(matched_idxs_per_image, 0)[0]
+      num_foreground = foreground_idxs_per_image.numel()
+
+      matched_gt_boxes_per_image = targets_per_image["boxes"][matched_idxs_per_image[foreground_idxs_per_image]]
+      bbox_regression_per_image = bbox_regression_per_image[foreground_idxs_per_image, :]
+      anchors_per_image = anchors_per_image[foreground_idxs_per_image, :]
+
+      # TODO: implement boxcoder
+      # target_regression = self.box
 
 class RetinaHead:
   def __init__(self, in_channels, num_anchors, num_classes):
@@ -228,6 +289,47 @@ class FPN:
     if self.extra_blocks is not None:
       results = self.extra_blocks(results, x)
     return results
+  
+# TODO: written using torch
+# need to check if grads are broken from the graph if used
+class Matcher:
+  BELOW_LOW_THRESHOLD = -1
+  BETWEEN_THRESHOLDS = -2
+
+  def __init__(self, high_threshold, low_threshold, allow_low_quality_matches=False):
+    assert low_threshold <= high_threshold
+    self.high_threshold = high_threshold
+    self.low_threshold = low_threshold
+    self.allow_low_quality_matches = allow_low_quality_matches
+
+  def __call__(self, match_quality_matrix):
+    if match_quality_matrix.numel() == 0:
+      if match_quality_matrix.shape[0] == 0:
+        raise ValueError("No ground-truth boxes available for one of the images during training")
+      else:
+        raise ValueError("No proposal boxes vailable for one of the images during training")
+      
+    matched_vals, matches = match_quality_matrix.max(dim=0)
+    if self.allow_low_quality_matches: all_matches = matches.copy()
+    else: all_matches = None
+
+    below_threshold = matched_vals < self.low_threshold
+    between_thresholds = (matched_vals >= self.low_threshold) & (matched_vals < self.high_threshold)
+
+    matches[below_threshold] = self.BELOW_LOW_THRESHOLD
+    matches[between_thresholds] = self.BETWEEN_THRESHOLDS
+
+    if self.allow_low_quality_matches:
+      assert all_matches is not None
+      self.set_low_quality_matches_(matches, all_matches, match_quality_matrix)
+
+    return matches
+  
+  def set_low_quality_matches_(self, matches, all_matches, match_quality_matrix):
+    highest_quality_foreach_gt, _ = match_quality_matrix.max(dim=1)
+    gt_pred_pairs_of_highest_quality = torch.where(match_quality_matrix == highest_quality_foreach_gt[:, None])
+    pred_inds_to_update = gt_pred_pairs_of_highest_quality[1]
+    matches[pred_inds_to_update] = all_matches[pred_inds_to_update]
 
 if __name__ == "__main__":
   from extra.models.resnet import ResNeXt50_32X4D
