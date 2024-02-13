@@ -1,12 +1,13 @@
 import math
-from tinygrad import Tensor
+from tinygrad import Tensor, dtypes
 from tinygrad.helpers import flatten, get_child
-from typing import List
+from typing import List, Dict, Union
 import tinygrad.nn as nn
 from extra.models.resnet import ResNet
+from examples.mlperf.retinanet.boxes import box_iou
 from examples.mlperf.retinanet.losses import sigmoid_focal_loss
+from examples.mlperf.retinanet.utils import Matcher
 import numpy as np
-import torch
 
 def nms(boxes, scores, thresh=0.5):
   x1, y1, x2, y2 = np.rollaxis(boxes, 1)
@@ -58,7 +59,7 @@ def _sum(x:List[Tensor]) -> Tensor:
   return res
 
 class RetinaNet:
-  def __init__(self, backbone: ResNet, num_classes=264, num_anchors=9, scales=None, aspect_ratios=None):
+  def __init__(self, backbone: ResNet, num_classes=264, num_anchors=9, scales=None, aspect_ratios=None, fg_iou_thresh=0.5, bg_iou_thresh=0.4):
     assert isinstance(backbone, ResNet)
     scales = tuple((i, int(i*2**(1/3)), int(i*2**(2/3))) for i in 2**np.arange(5, 10)) if scales is None else scales
     aspect_ratios = ((0.5, 1.0, 2.0),) * len(scales) if aspect_ratios is None else aspect_ratios
@@ -91,9 +92,21 @@ class RetinaNet:
       assert obj.shape == dat.shape, (k, obj.shape, dat.shape)
       obj.assign(dat)
 
-  def compute_loss(self, targets, head_outputs):
-    anchors = self.anchor_gen((800, 800))
-    import pdb; pdb.set_trace()
+  def compute_loss(self, targets, head_outputs, input_size=(800, 800)):
+    anchors = [np.concatenate(self.anchor_gen(input_size), axis=0) for _ in range(len(targets))]
+    matched_idxs = []
+
+    for anchors_per_image, targets_per_image in zip(anchors, targets):
+      boxes = Tensor(targets_per_image["boxes"])
+
+      if boxes.numel() == 0:
+        matched_idxs.append(Tensor.full((anchors_per_image.shape[0],), -1, dtype=dtypes.int64))
+        continue
+
+      match_quality_matrix = box_iou(boxes, Tensor(anchors_per_image))
+      matched_idxs.append(self.proposal_matcher(match_quality_matrix))
+
+    return self.head.compute_loss(targets, head_outputs, anchors, matched_idxs)
 
   # predictions: (BS, (H1W1+...+HmWm)A, 4 + K)
   def postprocess_detections(self, predictions, input_size=(800, 800), image_sizes=None, orig_image_sizes=None, score_thresh=0.05, topk_candidates=1000, nms_thresh=0.5):
@@ -226,10 +239,14 @@ class RetinaHead:
   def __init__(self, in_channels, num_anchors, num_classes):
     self.classification_head = ClassificationHead(in_channels, num_anchors, num_classes)
     self.regression_head = RegressionHead(in_channels, num_anchors)
-  def __call__(self, x):
+
+  def __call__(self, x) -> Union[Dict[str, Tensor], Tensor]:
     pred_bbox, pred_class = self.regression_head(x), self.classification_head(x)
-    out = pred_bbox.cat(pred_class, dim=-1)
-    return out
+    if Tensor.training: return dict(cls_logits=pred_class, bbox_regression=pred_bbox)
+    else: return pred_bbox.cat(pred_class, dim=-1)
+
+  def compute_loss(self, targets, head_outputs, anchors, matched_idxs):
+    pass
 
 class ResNetFPN:
   def __init__(self, resnet, out_channels=256, returned_layers=[2, 3, 4]):
@@ -290,47 +307,6 @@ class FPN:
       results = self.extra_blocks(results, x)
     return results
   
-# TODO: written using torch
-# need to check if grads are broken from the graph if used
-class Matcher:
-  BELOW_LOW_THRESHOLD = -1
-  BETWEEN_THRESHOLDS = -2
-
-  def __init__(self, high_threshold, low_threshold, allow_low_quality_matches=False):
-    assert low_threshold <= high_threshold
-    self.high_threshold = high_threshold
-    self.low_threshold = low_threshold
-    self.allow_low_quality_matches = allow_low_quality_matches
-
-  def __call__(self, match_quality_matrix):
-    if match_quality_matrix.numel() == 0:
-      if match_quality_matrix.shape[0] == 0:
-        raise ValueError("No ground-truth boxes available for one of the images during training")
-      else:
-        raise ValueError("No proposal boxes vailable for one of the images during training")
-      
-    matched_vals, matches = match_quality_matrix.max(dim=0)
-    if self.allow_low_quality_matches: all_matches = matches.copy()
-    else: all_matches = None
-
-    below_threshold = matched_vals < self.low_threshold
-    between_thresholds = (matched_vals >= self.low_threshold) & (matched_vals < self.high_threshold)
-
-    matches[below_threshold] = self.BELOW_LOW_THRESHOLD
-    matches[between_thresholds] = self.BETWEEN_THRESHOLDS
-
-    if self.allow_low_quality_matches:
-      assert all_matches is not None
-      self.set_low_quality_matches_(matches, all_matches, match_quality_matrix)
-
-    return matches
-  
-  def set_low_quality_matches_(self, matches, all_matches, match_quality_matrix):
-    highest_quality_foreach_gt, _ = match_quality_matrix.max(dim=1)
-    gt_pred_pairs_of_highest_quality = torch.where(match_quality_matrix == highest_quality_foreach_gt[:, None])
-    pred_inds_to_update = gt_pred_pairs_of_highest_quality[1]
-    matches[pred_inds_to_update] = all_matches[pred_inds_to_update]
-
 if __name__ == "__main__":
   from extra.models.resnet import ResNeXt50_32X4D
   backbone = ResNeXt50_32X4D()
