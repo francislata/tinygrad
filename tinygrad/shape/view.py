@@ -1,9 +1,9 @@
 from __future__ import annotations
 import functools, operator, itertools
 from dataclasses import dataclass
-from typing import Tuple, List, Optional, Dict, cast
+from typing import Tuple, List, Optional, Dict, Set, cast
 from tinygrad.helpers import prod, all_int, argsort
-from tinygrad.shape.symbolic import Node, NumNode, Variable, Set, sint
+from tinygrad.shape.symbolic import Node, NumNode, Variable, sint
 
 @functools.lru_cache(maxsize=None)
 def canonicalize_strides(shape:Tuple[int, ...], strides:Tuple[int, ...]) -> Tuple[int, ...]:
@@ -22,14 +22,14 @@ def _merge_dims(shape:Tuple[int, ...], strides:Tuple[int, ...], mask:Optional[Tu
   assert len(shape) == len(strides)
   ret = [(shape[0], strides[0], shape[0] if strides[0] else 0)]
   # wrt merging zero strided dimensions
-  merging = (mask and strides[0] == 0 and shape[0] != 1 and mask[0][1] - mask[0][0] == 1)
+  merging = strides[0] == 0 and (mask[0][1] - mask[0][0] == 1 if mask else shape[0] == 1)
   for i, (sh, st) in enumerate(zip(shape[1:], strides[1:]), start=1):
     if sh == 1: continue
     if merging or ret[-1][1] == sh * st: # mergeable
       ret[-1] = (ret[-1][0] * sh, st, (sh if merging else ret[-1][2] * sh) if st else 0)
     else: ret.append((sh, st, sh if st else 0)) # begin new
     # merging ends with either non-zero strided dim or zero strided dim with mask range > 1
-    merging = (st == 0 and mask and mask[i][1] - mask[i][0] == 1)
+    merging = st == 0 and (mask[i][1] - mask[i][0] == 1 if mask else sh == 1)
   return tuple(ret)
 
 @functools.lru_cache(maxsize=None)
@@ -82,9 +82,12 @@ class View:
   @functools.lru_cache(maxsize=None)
   def create(shape:Tuple[sint, ...], strides:Optional[Tuple[sint, ...]]=None, offset:sint=0, mask:Optional[Tuple[Tuple[sint, sint], ...]]=None):
     strides = canonicalize_strides(shape, strides) if strides else strides_for_shape(shape)
+    # canonicalize empty mask
+    if mask is not None and all(m == (0,s) for m,s in zip(mask, shape)): mask = None
     contiguous = offset == 0 and mask is None and strides == strides_for_shape(shape)
     # if any dimension has size >1, but is masked such that only one index in the dimension is unmasked
     # then its stride can also be set to 0, albeit with a corresponding adjustment required to the offset
+    # TODO: assert comparison with LtNode to avoid mis-using symbolic
     if mask and any(elim := [not (b+1 < e) for b,e in mask]):
       if any(not (b < e) for b,e in mask):
         strides, offset, mask = (0,) * len(shape), 0, ((0,0),) * len(shape)
@@ -104,7 +107,8 @@ class View:
     new_shape = tuple([s if isinstance(s, int) else s.substitute(unbound_vars) for s in self.shape])
     new_strides = tuple([s if isinstance(s, int) else s.substitute(unbound_vars) for s in self.strides])
     new_offset = self.offset if isinstance(self.offset, int) else self.offset.substitute(unbound_vars)
-    new_mask = tuple((a if isinstance(a, int) else a.substitute(unbound_vars), b if isinstance(b, int) else b.substitute(unbound_vars)) for (a, b) in self.mask) if self.mask is not None else None  # noqa: E501
+    new_mask = tuple((a if isinstance(a, int) else a.substitute(unbound_vars),
+                      b if isinstance(b, int) else b.substitute(unbound_vars)) for (a, b) in self.mask) if self.mask is not None else None
     return View.create(new_shape, new_strides, new_offset, new_mask), dict(x[1] for x in var_unboundvar_val)
 
   @functools.lru_cache(maxsize=None)  # pylint: disable=method-cache-max-size-none
@@ -159,7 +163,8 @@ class View:
   def permute(self, axis: Tuple[int, ...]) -> View:
     assert all(isinstance(x, int) and x >= 0 and x < len(self.shape) for x in axis), f"invalid permute {axis} for {self.shape}"
     assert len(set(axis)) == len(axis) and len(axis) == len(self.shape), f"can't permute {self.shape} with {axis}"
-    return View.create(tuple([self.shape[a] for a in axis]), tuple([self.strides[a] for a in axis]), self.offset, tuple([self.mask[a] for a in axis]) if self.mask is not None else None)  # noqa: E501
+    return View.create(tuple(self.shape[a] for a in axis), tuple(self.strides[a] for a in axis), self.offset,
+                       tuple(self.mask[a] for a in axis) if self.mask is not None else None)
 
   @functools.lru_cache(maxsize=None)  # pylint: disable=method-cache-max-size-none
   def stride(self, mul: Tuple[int, ...]) -> View:
@@ -168,7 +173,8 @@ class View:
     strides = tuple([z*m for z,m in zip(self.strides, mul)])
     new_shape = tuple([(s+(abs(m)-1))//abs(m) for s,m in zip(self.shape, mul)])
     offset = sum([(s-1)*z for s,z,m in zip(self.shape, self.strides, mul) if m < 0])
-    mask = tuple([(((mx if m > 0 else s-my)+(abs(m)-1))//abs(m), ((my if m > 0 else s-mx)+(abs(m)-1))//abs(m)) for (mx,my),s,m in zip(self.mask, self.shape, mul)]) if self.mask is not None else None  # noqa: E501
+    mask = tuple([(((mx if m > 0 else s-my)+(abs(m)-1))//abs(m), ((my if m > 0 else s-mx)+(abs(m)-1))//abs(m)) \
+                  for (mx,my),s,m in zip(self.mask, self.shape, mul)]) if self.mask is not None else None
     return View.create(new_shape, strides, self.offset + offset, mask)
 
   @functools.lru_cache(maxsize=None)  # pylint: disable=method-cache-max-size-none
