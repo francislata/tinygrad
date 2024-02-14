@@ -69,10 +69,16 @@ class RetinaNet:
     self.backbone = ResNetFPN(backbone)
     self.head = RetinaHead(self.backbone.out_channels, num_anchors=num_anchors, num_classes=num_classes)
     self.anchor_gen = lambda input_size: generate_anchors(input_size, self.backbone.compute_grid_sizes(input_size), scales, aspect_ratios)
+    self.proposal_matcher = Matcher(fg_iou_thresh, bg_iou_thresh, allow_low_quality_matches=True)
 
-  def __call__(self, x, targets=None):
-    return self.compute_loss(targets, self.forward(x))
-    # return self.compute_loss(targets, self.forward(x)) if Tensor.training else self.forward(x)
+  def __call__(self, x, targets=None) -> Union[Dict[str, Tensor], Tensor]:
+    head_outputs = self.forward(x)
+
+    if Tensor.training:
+      assert targets is not None
+      return self.compute_loss(targets, head_outputs)
+    
+    return head_outputs
 
   def forward(self, x):
     return self.head(self.backbone(x))
@@ -173,32 +179,32 @@ class RetinaNet:
     return detections
 
 class ClassificationHead:
-  BETWEEN_THRESHOLDS = - 2 # TODO: use Matcher instead
-
   def __init__(self, in_channels, num_anchors, num_classes):
     self.num_classes = num_classes
     self.conv = flatten([(nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1), lambda x: x.relu()) for _ in range(4)])
     self.cls_logits = nn.Conv2d(in_channels, num_anchors * num_classes, kernel_size=3, padding=1)
+    self.BETWEEN_THRESHOLDS = Matcher.BETWEEN_THRESHOLDS
 
   def __call__(self, x):
     out = [self.cls_logits(feat.sequential(self.conv)).permute(0, 2, 3, 1).reshape(feat.shape[0], -1, self.num_classes) for feat in x]
     return out[0].cat(*out[1:], dim=1).sigmoid()
 
-  # TODO: need to test this
   def compute_loss(self, targets, head_outputs, matched_idxs):
     losses = []
 
-    cls_logits = head_outputs["cls_logits"]
-
-    for targets_per_image, cls_logits_per_image, matched_idxs_per_image in zip(targets, cls_logits, matched_idxs):
+    for targets_per_image, cls_logits_per_image, matched_idxs_per_image in zip(targets, head_outputs["cls_logits"], matched_idxs):
       foreground_idxs_per_image = matched_idxs_per_image >= 0
       num_foreground = foreground_idxs_per_image.sum()
 
-      gt_classes_target = Tensor.zeros_like(cls_logits_per_image)
-      # TODO: might need to use where here
-      gt_classes_target[foreground_idxs_per_image, targets_per_image["labels"][matched_idxs_per_image[foreground_idxs_per_image]]] = 1.0
+      # TODO: move this all to tinygrad
+      gt_classes_target = Tensor.zeros_like(cls_logits_per_image).numpy()
+      foreground_idxs_per_image = foreground_idxs_per_image.numpy()
+      matched_idxs_per_image = matched_idxs_per_image.numpy()
 
-      valid_idxs_per_image = matched_idxs_per_image != self.BETWEEN_THRESHOLDS
+      gt_classes_target[foreground_idxs_per_image, targets_per_image["labels"][matched_idxs_per_image[foreground_idxs_per_image]]] = 1.0
+      gt_classes_target = Tensor(gt_classes_target)
+
+      valid_idxs_per_image = Tensor(matched_idxs_per_image != self.BETWEEN_THRESHOLDS, dtype=dtypes.int)
 
       losses.append(
         sigmoid_focal_loss(
@@ -208,7 +214,16 @@ class ClassificationHead:
         ) / max(1, num_foreground)
       )
 
-    return _sum(losses) / len(losses)
+    loss = _sum(losses) / len(losses)
+    # import torch
+    # loss_torch = torch.load("/home/paperspace/projects/training/single_stage_detector/loss.pt")
+    from tinygrad.nn.state import safe_save
+    safe_save({"loss": loss}, "./loss_tinygrad.safetensors")
+    import pdb; pdb.set_trace()
+    # np.testing.assert_allclose(loss.numpy(), loss_torch.cpu().numpy())
+    # raise NotImplementedError("Test")
+
+    # return loss
 
 class RegressionHead:
   def __init__(self, in_channels, num_anchors):
@@ -220,6 +235,7 @@ class RegressionHead:
     return out[0].cat(*out[1:], dim=1)
   
   def compute_loss(self, targets, head_outputs, anchors, matched_idxs):
+    raise NotImplementedError("RegressionHead loss is not implemented!")
     losses = []
     bbox_regression = head_outputs["bbox_regression"]
 
@@ -245,8 +261,11 @@ class RetinaHead:
     if Tensor.training: return dict(cls_logits=pred_class, bbox_regression=pred_bbox)
     else: return pred_bbox.cat(pred_class, dim=-1)
 
-  def compute_loss(self, targets, head_outputs, anchors, matched_idxs):
-    pass
+  def compute_loss(self, targets, head_outputs, anchors, matched_idxs) -> Dict[str, Tensor]:
+    return dict(
+      classification=self.classification_head.compute_loss(targets, head_outputs, matched_idxs),
+      bbox_regression=self.regression_head.compute_loss(targets, head_outputs, anchors, matched_idxs)
+    )
 
 class ResNetFPN:
   def __init__(self, resnet, out_channels=256, returned_layers=[2, 3, 4]):
