@@ -49,7 +49,7 @@ def train_retinanet():
 
   for x, targets in iterate(coco, BS, val=False):
     dat = Tensor(x.astype(np.float32))
-    outs =  mdl(*input_target_fixup(dat, y=targets)).numpy()
+    outs =  mdl(*input_target_fixup(dat, y=targets))
 
 def train_unet3d():
   # TODO: Unet3d

@@ -36,5 +36,8 @@ class Matcher:
   
   def set_low_quality_matches(self, matches, all_matches, match_quality_matrix):
     highest_quality_foreach_gt = match_quality_matrix.max(axis=1)
-    matches = (match_quality_matrix == highest_quality_foreach_gt[:, None]).where(all_matches, matches).squeeze(0)
+
+    for i in range(match_quality_matrix.shape[0]):
+      matches = (match_quality_matrix[i] == highest_quality_foreach_gt[i]).where(all_matches, matches)
+
     return matches

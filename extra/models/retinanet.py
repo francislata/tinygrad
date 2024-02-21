@@ -3,9 +3,10 @@ from tinygrad import Tensor, dtypes
 from tinygrad.helpers import flatten, get_child
 from typing import List, Dict, Union
 import tinygrad.nn as nn
+from extra.models.mask_rcnn import BoxCoder
 from extra.models.resnet import ResNet
 from examples.mlperf.retinanet.boxes import box_iou
-from examples.mlperf.retinanet.losses import sigmoid_focal_loss
+from examples.mlperf.retinanet.losses import sigmoid_focal_loss, l1_loss
 from examples.mlperf.retinanet.utils import Matcher
 import numpy as np
 
@@ -193,63 +194,52 @@ class ClassificationHead:
     losses = []
 
     for targets_per_image, cls_logits_per_image, matched_idxs_per_image in zip(targets, head_outputs["cls_logits"], matched_idxs):
+      matched_idxs_per_image = matched_idxs_per_image.numpy()
       foreground_idxs_per_image = matched_idxs_per_image >= 0
       num_foreground = foreground_idxs_per_image.sum()
 
-      # TODO: move this all to tinygrad
-      gt_classes_target = Tensor.zeros_like(cls_logits_per_image).numpy()
-      foreground_idxs_per_image = foreground_idxs_per_image.numpy()
-      matched_idxs_per_image = matched_idxs_per_image.numpy()
-
+      gt_classes_target = np.zeros(cls_logits_per_image.shape)
       gt_classes_target[foreground_idxs_per_image, targets_per_image["labels"][matched_idxs_per_image[foreground_idxs_per_image]]] = 1.0
-      gt_classes_target = Tensor(gt_classes_target)
 
-      valid_idxs_per_image = Tensor(matched_idxs_per_image != self.BETWEEN_THRESHOLDS, dtype=dtypes.int)
+      valid_idxs_per_image = Tensor((matched_idxs_per_image != self.BETWEEN_THRESHOLDS).nonzero()[0])[:, None].expand(-1, cls_logits_per_image.shape[1])
 
       losses.append(
         sigmoid_focal_loss(
-          cls_logits_per_image[valid_idxs_per_image],
-          gt_classes_target[valid_idxs_per_image],
+          cls_logits_per_image.gather(valid_idxs_per_image, 0),
+          Tensor(gt_classes_target).gather(valid_idxs_per_image, 0),
           reduction="sum"
         ) / max(1, num_foreground)
       )
 
-    loss = _sum(losses) / len(losses)
-    # import torch
-    # loss_torch = torch.load("/home/paperspace/projects/training/single_stage_detector/loss.pt")
-    from tinygrad.nn.state import safe_save
-    safe_save({"loss": loss}, "./loss_tinygrad.safetensors")
-    import pdb; pdb.set_trace()
-    # np.testing.assert_allclose(loss.numpy(), loss_torch.cpu().numpy())
-    # raise NotImplementedError("Test")
-
-    # return loss
+    return _sum(losses) / len(losses)
 
 class RegressionHead:
   def __init__(self, in_channels, num_anchors):
     self.conv = flatten([(nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1), lambda x: x.relu()) for _ in range(4)])
     self.bbox_reg = nn.Conv2d(in_channels, num_anchors * 4, kernel_size=3, padding=1)
+    self.box_coder = BoxCoder((1.0, 1.0, 1.0, 1.0))
 
   def __call__(self, x):
     out = [self.bbox_reg(feat.sequential(self.conv)).permute(0, 2, 3, 1).reshape(feat.shape[0], -1, 4) for feat in x]
     return out[0].cat(*out[1:], dim=1)
   
   def compute_loss(self, targets, head_outputs, anchors, matched_idxs):
-    raise NotImplementedError("RegressionHead loss is not implemented!")
     losses = []
-    bbox_regression = head_outputs["bbox_regression"]
 
-    for targets_per_image, bbox_regression_per_image, anchors_per_image, matched_idxs_per_image in zip(targets, bbox_regression, anchors, matched_idxs):
-      # TODO: verify this
-      foreground_idxs_per_image = (matched_idxs_per_image >= 0).where(matched_idxs_per_image, 0)[0]
-      num_foreground = foreground_idxs_per_image.numel()
+    for targets_per_image, bbox_regression_per_image, anchors_per_image, matched_idxs_per_image in zip(targets, head_outputs["bbox_regression"], anchors, matched_idxs):
+      matched_idxs_per_image = matched_idxs_per_image.numpy()
+      foreground_idxs_per_image = np.where(matched_idxs_per_image >= 0)[0]
+      num_foreground = foreground_idxs_per_image.size
 
-      matched_gt_boxes_per_image = targets_per_image["boxes"][matched_idxs_per_image[foreground_idxs_per_image]]
-      bbox_regression_per_image = bbox_regression_per_image[foreground_idxs_per_image, :]
-      anchors_per_image = anchors_per_image[foreground_idxs_per_image, :]
+      matched_gt_boxes_per_image = Tensor(targets_per_image["boxes"][matched_idxs_per_image[foreground_idxs_per_image]])
+      bbox_regression_per_image = bbox_regression_per_image.gather(Tensor(foreground_idxs_per_image).reshape(-1, 1).expand(-1, 4), 0)
+      anchors_per_image = Tensor(anchors_per_image[foreground_idxs_per_image, :])
 
-      # TODO: implement boxcoder
-      # target_regression = self.box
+      target_regression = self.box_coder.encode(matched_gt_boxes_per_image, anchors_per_image)
+
+      losses.append(l1_loss(bbox_regression_per_image, target_regression, reduction="sum") / max(1, num_foreground))
+
+    return _sum(losses) / max(1, len(targets))
 
 class RetinaHead:
   def __init__(self, in_channels, num_anchors, num_classes):
@@ -262,10 +252,10 @@ class RetinaHead:
     else: return pred_bbox.cat(pred_class, dim=-1)
 
   def compute_loss(self, targets, head_outputs, anchors, matched_idxs) -> Dict[str, Tensor]:
-    return dict(
-      classification=self.classification_head.compute_loss(targets, head_outputs, matched_idxs),
-      bbox_regression=self.regression_head.compute_loss(targets, head_outputs, anchors, matched_idxs)
-    )
+    return {
+      "classification": self.classification_head.compute_loss(targets, head_outputs, matched_idxs),
+      "bbox_regression": self.regression_head.compute_loss(targets, head_outputs, anchors, matched_idxs)
+    }
 
 class ResNetFPN:
   def __init__(self, resnet, out_channels=256, returned_layers=[2, 3, 4]):
