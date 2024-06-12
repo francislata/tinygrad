@@ -160,6 +160,81 @@ def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), o
   result = result[..., paddings[4]:image_shape[0]+paddings[4], paddings[2]:image_shape[1]+paddings[2], paddings[0]:image_shape[2]+paddings[0]]
   return result, labels
 
+# Based on https://github.com/mlcommons/training_results_v3.1/blob/5b62935b6baecd018180cb3100e65fa90ef7ac98/NVIDIA/benchmarks/unet3d/implementations/mxnet/runtime/inference.py
+class SlidingWindow:
+  def __init__(self, batch_size, roi_shape, cache_dataset=False):
+    self.batch_size = batch_size
+    self.roi_shape = roi_shape
+    self.cache_dataset = cache_dataset
+    self.input_buffer, self.output_buffer = self._get_buffers()
+    self.norm_patch = self._get_norm_patch()
+
+  def _get_buffers(self):
+    n = 144
+    input_shape, output_shape = (n + self.batch_size, 1, *self.roi_shape), (n + self.batch_size, 3, *self.roi_shape)
+    batch, output = np.zeros(input_shape), np.zeros(output_shape)
+    return batch, output
+  
+  def _get_norm_patch(self):
+    norm_patch = gaussian_kernel(self.roi_shape[0], 0.125 * self.roi_shape[0])
+    return np.expand_dims(norm_patch, axis=0)
+  
+  def run(self, model, inputs, labels, overlap=0.5):
+    image_shape, dim = list(inputs.shape[2:]), len(inputs.shape[2:])
+    print(image_shape)
+    strides = [int(self.roi_shape[i] * (1 - overlap)) for i in range(dim)]
+    bounds = [image_shape[i] % strides[i] for i in range(dim)]
+    bounds = [bounds[i] if bounds[i] < strides[i] // 2 else 0 for i in range(dim)]
+    inputs = inputs[
+      ...,
+      bounds[0]//2:image_shape[0]-(bounds[0]-bounds[0]//2),
+      bounds[1]//2:image_shape[1]-(bounds[1]-bounds[1]//2),
+      bounds[2]//2:image_shape[2]-(bounds[2]-bounds[2]//2),
+    ]
+    labels = labels[
+      ...,
+      bounds[0]//2:image_shape[0]-(bounds[0]-bounds[0]//2),
+      bounds[1]//2:image_shape[1]-(bounds[1]-bounds[1]//2),
+      bounds[2]//2:image_shape[2]-(bounds[2]-bounds[2]//2),
+    ]
+    inputs, paddings = pad_input(inputs, self.roi_shape, strides)
+    padded_shape = inputs.shape[2:]
+    size = [(inputs.shape[2:][i] - self.roi_shape[i]) // strides[i] + 1 for i in range(dim)]
+    result = np.zeros((1, 3, *padded_shape), dtype=np.float32)
+    norm_map = np.zeros((1, 3, *padded_shape), dtype=np.float32)
+
+    # Acquire patches
+    count = 0
+    print(f"input buffer: {self.input_buffer.shape}")
+    for i in range(0, strides[0] * size[0], strides[0]):
+      for j in range(0, strides[1] * size[1], strides[1]):
+        for k in range(0, strides[2] * size[2], strides[2]):
+          self.input_buffer[count] = inputs[..., i:self.roi_shape[0] + i, j:self.roi_shape[1] + j, k:self.roi_shape[2] + k]
+          count += 1
+
+    batch_pad = self.batch_size - count % self.batch_size if count % self.batch_size else 0
+
+    if self.cache_dataset:
+      cache = {"image_shape": image_shape, "padded_shape": padded_shape, "count": count, "paddings": paddings}
+      self.cache.append((self.input_buffer[:count + batch_pad].copy(), labels.copy(), cache))
+
+    for i in range(0, count + batch_pad, self.batch_size):
+      print("inference")
+      self.output_buffer[i:i + self.batch_size] = model(Tensor(self.input_buffer[i:i + self.batch_size])).numpy() * self.norm_patch
+
+    return
+    count = 0
+    for i in range(0, strides[0] * size[0], strides[0]):
+      for j in range(0, strides[1] * size[1], strides[1]):
+        for k in range(0, strides[2] * size[2], strides[2]):
+          result[..., i:self.roi_shape[0] + i, j:self.roi_shape[1] + j, k:self.roi_shape[2] + k] += self.output_buffer[count]
+          norm_map[..., i:self.roi_shape[0] + i, j:self.roi_shape[1] + j, k:self.roi_shape[2] + k] += self.norm_patch
+          count += 1
+
+    result /= norm_map
+    result = result[..., paddings[4]:image_shape[0]+paddings[4], paddings[2]:image_shape[1]+paddings[2], paddings[0]:image_shape[2]+paddings[0]]
+    return result, labels
+
 def rand_flip(image, label, axis=(1, 2, 3)):
   prob = 1 / len(axis)
   for ax in axis:
