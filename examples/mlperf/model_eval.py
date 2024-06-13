@@ -64,18 +64,15 @@ def eval_resnet():
 def eval_unet3d():
   # UNet3D
   from extra.models.unet3d import UNet3D
-  from extra.datasets.kits19 import iterate, sliding_window_inference, get_val_files, SlidingWindow
+  from extra.datasets.kits19 import iterate, sliding_window_inference, get_val_files
   from examples.mlperf.metrics import dice_score
-  sw_inference = SlidingWindow(1, (128, 128, 128), cache_dataset=False)
   mdl = UNet3D()
   mdl.load_from_pretrained()
   s = 0
   st = time.perf_counter()
   for i, (image, label) in enumerate(iterate(get_val_files()), start=1):
     mt = time.perf_counter()
-    print(image.shape, label.shape)
-    pred, label = sw_inference.run(mdl, image, label)
-    # pred, label = sliding_window_inference(mdl, image, label)
+    pred, label = sliding_window_inference(mdl, image, label)
     et = time.perf_counter()
     print(f"{(mt-st)*1000:.2f} ms loading data, {(et-mt)*1000:.2f} ms to run model")
     s += dice_score(Tensor(pred), Tensor(label)).mean().item()
