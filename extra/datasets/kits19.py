@@ -8,7 +8,7 @@ import os
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-from tinygrad import TinyJit, Tensor
+from tinygrad import Tensor
 from tinygrad.helpers import fetch
 
 BASEDIR = Path(__file__).parent / "kits19" / "data"
@@ -124,12 +124,10 @@ def pad_input(volume, roi_shape, strides, padding_mode="constant", padding_val=-
   paddings = [bounds[2]//2, bounds[2]-bounds[2]//2, bounds[1]//2, bounds[1]-bounds[1]//2, bounds[0]//2, bounds[0]-bounds[0]//2, 0, 0, 0, 0]
   return F.pad(torch.from_numpy(volume), paddings, mode=padding_mode, value=padding_val).numpy(), paddings
 
-def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), overlap=0.5, batch_size=1):
+def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), overlap=0.5, batch_size=1, gpus=None):
   n = 144
   input_buffer, output_buffer = np.zeros((n + batch_size, 1, *roi_shape)), np.zeros((n + batch_size, 3, *roi_shape))
 
-
-  mdl_run = TinyJit(lambda x: model(x).realize())
   image_shape, dim = list(inputs.shape[2:]), len(inputs.shape[2:])
   strides = [int(roi_shape[i] * (1 - overlap)) for i in range(dim)]
   bounds = [image_shape[i] % strides[i] for i in range(dim)]
@@ -164,8 +162,8 @@ def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), o
   batch_pad = batch_size - count % batch_size if count % batch_size else 0
 
   for i in range(0, count + batch_pad, batch_size):
-    print("inference")
-    output_buffer[i:i + batch_size] = mdl_run(Tensor(input_buffer[i:i + batch_size])) * norm_patch
+    input = Tensor(input_buffer[i:i + batch_size], device=gpus)
+    output_buffer[i:i + batch_size] = model(input).numpy() * norm_patch
 
   count = 0
   for i in range(0, strides[0] * size[0], strides[0]):

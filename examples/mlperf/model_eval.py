@@ -66,13 +66,20 @@ def eval_unet3d():
   from extra.models.unet3d import UNet3D
   from extra.datasets.kits19 import iterate, sliding_window_inference, get_val_files
   from examples.mlperf.metrics import dice_score
+
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 6))]
+  for x in GPUS: Device[x]
+
   mdl = UNet3D()
+  for x in get_parameters(mdl): x.to_(GPUS)
+
   mdl.load_from_pretrained()
+  mdl_run = TinyJit(lambda x: mdl(x).realize())
   s = 0
   st = time.perf_counter()
   for i, (image, label) in enumerate(iterate(get_val_files()), start=1):
     mt = time.perf_counter()
-    pred, label = sliding_window_inference(mdl, image, label)
+    pred, label = sliding_window_inference(mdl_run, image, label, batch_size=6, gpus=GPUS)
     et = time.perf_counter()
     print(f"{(mt-st)*1000:.2f} ms loading data, {(et-mt)*1000:.2f} ms to run model")
     s += dice_score(Tensor(pred), Tensor(label)).mean().item()
