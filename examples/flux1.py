@@ -7,7 +7,7 @@
 from tinygrad import Tensor, dtypes, TinyJit
 from tinygrad.nn.state import safe_load, load_state_dict
 from tinygrad.helpers import fetch, tqdm, colored
-from extra.models.flux import ClipEmbedder, AutoEncoder, Flux
+from extra.models.flux1 import ClipEmbedder, AutoEncoder, Flux
 from extra.models.t5 import T5Embedder
 import numpy as np
 
