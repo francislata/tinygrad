@@ -69,6 +69,12 @@ class MLPEmbedder:
   def __call__(self, x:Tensor) -> Tensor:
     return self.out_layer(self.in_layer(x).silu())
 
+  def init_weights(self, init_std:float = 0.02):
+    self.in_layer.weight = Tensor.normal(*self.in_layer.weight.shape, std=init_std)
+    self.in_layer.bias = Tensor.zeros_like(self.in_layer.bias)
+    self.out_layer.weight = Tensor.normal(*self.out_layer.weight.shape, std=init_std)
+    self.out_layer.bias = Tensor.zeros_like(self.out_layer.bias)
+
 class QKNorm:
   def __init__(self, dim:int):
     self.query_norm = nn.RMSNorm(dim)
@@ -92,6 +98,11 @@ class SelfAttention:
     q, k = self.norm(q, k)
     x = attention(q, k, v, pe=pe)
     return self.proj(x)
+  
+  def init_weights(self):
+    for layer in (self.qkv, self.proj):
+      layer.weight = Tensor.glorot_uniform(*layer.weight.shape)
+      layer.bias = Tensor.zeros_like(layer.bias)
 
 @dataclass
 class ModulationOut:
@@ -108,6 +119,10 @@ class Modulation:
   def __call__(self, vec:Tensor) -> Tuple[ModulationOut, Optional[ModulationOut]]:
     out = self.lin(vec.silu())[:, None, :].chunk(self.multiplier, dim=-1)
     return ModulationOut(*out[:3]), ModulationOut(*out[3:]) if self.is_double else None
+  
+  def init_weights(self):
+    self.lin.weight = Tensor.zeros_like(self.lin.weight)
+    self.lin.bias = Tensor.zeros_like(self.lin.bias)
 
 class DoubleStreamBlock:
   def __init__(self, hidden_size:int, num_heads:int, mlp_ratio:float, qkv_bias:bool = False):
@@ -163,6 +178,14 @@ class DoubleStreamBlock:
     txt = txt + txt_mod2.gate * ((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift).sequential(self.txt_mlp)
     return img, txt
 
+  def init_weights(self):
+    for layer in (self.img_mlp[0], self.img_mlp[2], self.txt_mlp[0], self.txt_mlp[2]):
+      layer.weight = Tensor.glorot_uniform(*layer.weight.shape)
+      layer.bias = Tensor.zeros_like(layer.bias)
+
+    for layer in (self.img_attn, self.img_mod, self.txt_attn, self.txt_mod):
+      layer.init_weights()
+
 
 class SingleStreamBlock:
   """
@@ -202,6 +225,15 @@ class SingleStreamBlock:
     # compute activation in mlp stream, cat again and run second linear layer
     output = self.linear2(Tensor.cat(attn, self.mlp_act(mlp), dim=2))
     return x + mod.gate * output
+  
+  def init_weights(self):
+    for layer in (self.linear1, self.linear2):
+      layer.weight = Tensor.glorot_uniform(*layer.weight.shape)
+      layer.bias = Tensor.zeros_like(layer.bias)
+      layer.weight = Tensor.glorot_uniform(*layer.weight.shape)
+      layer.bias = Tensor.zeros_like(layer.bias)
+
+    self.modulation.init_weights()
 
 
 class LastLayer:
@@ -214,6 +246,12 @@ class LastLayer:
     shift, scale = vec.sequential(self.adaLN_modulation).chunk(2, dim=1)
     x = (1 + scale[:, None, :]) * self.norm_final(x) + shift[:, None, :]
     return self.linear(x)
+  
+  def init_weights(self):
+    self.adaLN_modulation[-1].weight = Tensor.zeros_like(self.adaLN_modulation[-1].weight)
+    self.adaLN_modulation[-1].bias = Tensor.zeros_like(self.adaLN_modulation[-1].bias)
+    self.linear.weight = Tensor.zeros_like(self.linear.weight)
+    self.linear.bias = Tensor.zeros_like(self.linear.bias)
 
 def timestep_embedding(t:Tensor, dim:int, max_period:int=10000, time_factor:float=1000.0) -> Tensor:
   """
@@ -302,3 +340,21 @@ class Flux:
     img = img[:, txt.shape[1] :, ...]
 
     return self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
+
+  def _init_weights(self):
+    self.img_in.weight = Tensor.glorot_uniform(*self.img_in.weight.shape)
+    self.img_in.bias = Tensor.zeros_like(self.img_in.bias)
+
+    self.txt_in.weight = Tensor.glorot_uniform(*self.txt_in.weight.shape)
+    self.txt_in.bias = Tensor.zeros_like(self.txt_in.bias)
+
+    self.time_in.init_weights()
+    self.vector_in.init_weights()
+
+    for block in self.single_blocks:
+      block.init_weights()
+
+    for block in self.double_blocks:
+      block.init_weights()
+
+    self.final_layer.init_weights()
