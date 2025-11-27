@@ -1638,6 +1638,21 @@ def train_stable_diffusion():
   """)
     t6 = time.perf_counter()
 
+def train_flux():
+  config = {}
+
+  gpus = config["gpus"] = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 1))]
+  seed = config["seed"] = getenv("SEED", None)
+  seq_len = config["seq_len"] = getenv("SEQ_LEN", 256)
+  num_steps = config["num_steps"] = getenv("NUM_STEPS", 30000)
+
+  # hyperparameters
+  batch_size = config["batch_size"] = getenv("BS", 16)
+  lr = config["lr"] = 1e-4
+  lr_eps = config["lr_eps"] = 1e-8
+  lr_warmup_steps = config["lr_warmup_steps"] = 0
+  lr_decay_ratio = config["lr_decay_ratio"] = 0.0
+
 if __name__ == "__main__":
   multiprocessing.set_start_method('spawn')
 
