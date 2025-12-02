@@ -1,8 +1,9 @@
 import os, random, pickle, queue, struct, math, functools, hashlib, time
-from typing import List
+from typing import List, Any
 from pathlib import Path
 from multiprocessing import Queue, Process, shared_memory, connection, Lock, cpu_count
 
+import io
 import numpy as np
 from tinygrad import dtypes, Tensor
 from tinygrad.helpers import getenv, prod, Context, round_up, tqdm, OSX
@@ -784,6 +785,65 @@ def iterate_llama3_dataset(dataset:BlendedGPTDataset, bs:int):
 def batch_load_llama3(bs:int, samples:int, seqlen:int, base_dir:Path, seed:int=0, val:bool=True, small:bool=False):
   return iterate_llama3_dataset(get_llama3_dataset(samples, seqlen, base_dir, seed, val, small), bs)
 
+# flux.1
+
+class FluxDataset:
+  def __init__(self, dataset, classifer_free_guidance_prob=0.1):
+    self.dataset = dataset
+    self.classifier_free_guidance_prob = classifer_free_guidance_prob
+
+  def __iter__(self):
+    iterator = iter(self.dataset)
+
+    while True:
+      try:
+        sample = next(iterator)
+      except StopIteration:
+        break
+
+      sample = self._preprocess_data(sample)
+
+      # skip low quality image or image with color channel = 1
+      if "image" in sample and sample["image"] is None:
+        continue
+
+      # NOTE: might need to set seed somewhere else
+      # Classifier-free guidance: Replace some of the strings with empty strings.
+      # Distinct random seed is initialized at the beginning of training for each FSDP rank.
+
+      if self.classifier_free_guidance_prob > 0 and random.random() < self.classifier_free_guidance_prob:
+        if "t5_encodings" in sample:
+          sample["drop_encodings"] = True
+      else:
+        if "t5_encodings" in sample:
+          sample["drop_encodings"] = False
+
+      labels = sample.pop("image") if "image" in sample else  (sample.pop("mean"), sample.pop("logvar"))
+
+      yield sample, labels
+
+  def _preprocess_data(self, sample:dict[str, Any]) -> dict[str, Tensor]:
+    sample = sample.copy()
+
+    sample["t5_encodings"] = self._deserialize_data(sample["t5_encodings"])
+    sample["clip_encodings"] = self._deserialize_data(sample["clip_encodings"])
+    sample["mean"] = self._deserialize_data(sample["mean"])
+    sample["logvar"] = self._deserialize_data(sample["logvar"])
+
+    return sample
+
+  def _deserialize_data(self, data: bytes) -> Tensor:
+    return Tensor(np.load(io.BytesIO(data))).bitcast(dtypes.bfloat16)
+
+# mlperf implementation uses hf's `datasets` library to load the dataset files (https://github.com/pytorch/torchtitan/blob/21c4098d3564570ccfcda6aca97d2c4bde54020f/torchtitan/experiments/flux/dataset/flux_dataset.py#L197)
+def batch_load_flux1(base_dir:Path):
+  from datasets import load_from_disk
+
+  dataset = FluxDataset(load_from_disk(base_dir))
+  return dataset
+  # test out by iterating through it
+  # write a complete Dataset class for it and iterate through it here.
+
 if __name__ == "__main__":
   def load_unet3d(val):
     assert not val, "validation set is not supported due to different sizes on inputs"
@@ -823,6 +883,11 @@ if __name__ == "__main__":
       min_ = min(min_, tokens.shape[1])
     print(f"max seq length: {max_}")
     print(f"min seq length: {min_}")
+
+  def load_flux1(val):
+    dataset = batch_load_flux1(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"))
+    for s in dataset:
+      print(s)
 
   load_fn_name = f"load_{getenv('MODEL', 'resnet')}"
   if load_fn_name in globals():
