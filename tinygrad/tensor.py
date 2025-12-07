@@ -11,7 +11,7 @@ from tinygrad.helpers import suppress_finalizing, disable_gc
 from tinygrad.gradient import compute_gradient
 from tinygrad.mixin import OpMixin
 from tinygrad.mixin.movement import _align_left
-from tinygrad.uop.ops import smax, smin, resolve, UOp, Ops, sint, identity_element, all_metadata, _index_to_concrete_int, sint_to_uop
+from tinygrad.uop.ops import smax, smin, resolve, UOp, Ops, sint, identity_element, all_metadata, _index_to_concrete_int, sint_to_uop, Variable
 from tinygrad.engine.schedule import ScheduleItem, complete_create_schedule_with_vars
 from tinygrad.device import Device, Buffer
 from tinygrad.engine.realize import run_schedule
@@ -27,7 +27,7 @@ def _apply_map_to_tensors(applied_map:dict[UOp, UOp], name:str) -> None:
     # get tensors in scope
     in_scope: dict[UOp, bool] = {}
     def visitor(node: UOp) -> bool: return True if node in applied_map else any(in_scope.get(s, False) for s in node.src)
-    scope_tensors = [t for tref in list(all_tensors) if (t:=tref()) is not None and t.uop.topovisit(visitor, in_scope)]
+    scope_tensors: list[Tensor] = [t for tref in list(all_tensors) if (t:=tref()) is not None and t.uop.topovisit(visitor, in_scope)]
 
     # get all Tensors and apply the map
     sink = UOp.sink(*[t.uop for t in scope_tensors])
@@ -134,8 +134,10 @@ class Tensor(OpMixin):
         # give the bound constant a device
         const = UOp.const(var.dtype, val, _device, ())
         data = data.replace(src=(var.replace(src=const.src), const))  # type: ignore
-    elif data is None: data = UOp.const(_dtype or dtypes.default_float, 0, _device, (), unique=_force_unique)
-    elif isinstance(data, get_args(ConstType)): data = UOp.const(_dtype or dtypes.from_py(data), data, _device, (), unique=_force_unique)
+    elif data is None:
+      data = (UOp.unique_const if _force_unique else UOp.const)(_dtype or dtypes.default_float, 0, _device)
+    elif isinstance(data, get_args(ConstType)):
+      data = (UOp.unique_const if _force_unique else UOp.const)(_dtype or dtypes.from_py(data), data, _device)
     elif isinstance(data, bytes): data = _frompy(data, dtypes.uint8 if _dtype is None else _dtype)
     elif isinstance(data, (list, tuple)):
       if _dtype is None:
@@ -146,8 +148,10 @@ class Tensor(OpMixin):
     elif is_numpy_ndarray(data):
       import numpy as np
       assert isinstance(data, np.ndarray), f"expected np.ndarray, got {data}"
-      if data.shape == (): data = UOp.const(_dtype or _from_np_dtype(data.dtype), data.item(), _device, (), unique=_force_unique)
-      else: data = _fromnp(data.astype(npdtype) if _dtype is not None and (npdtype:=_to_np_dtype(_dtype)) is not None else data)  # type: ignore [name-defined]
+      if data.shape == ():
+        data = (UOp.unique_const if _force_unique else UOp.const)(_dtype or _from_np_dtype(data.dtype), data.item(), _device)
+      else:
+        data = _fromnp(data.astype(npdtype) if _dtype is not None and (npdtype:=_to_np_dtype(_dtype)) is not None else data)  # type: ignore [name-defined]
     elif isinstance(data, pathlib.Path):
       _dtype = _dtype or dtypes.uint8
       data = UOp.new_buffer(f"DISK:{data.resolve()}", data.stat().st_size // _dtype.itemsize, _dtype)
@@ -173,7 +177,14 @@ class Tensor(OpMixin):
     new_uop: UOp = fxn(*[t.uop for t in (self,)+x], *extra_args, **kwargs)
     if (metadata:=_METADATA.get()) is not None and TRACEMETA >= 1: all_metadata[new_uop] = (metadata,)
     needs_input_grad = [t.requires_grad for t in (self,)+x]
-    return Tensor(new_uop, device=new_uop.device, requires_grad=True if any(needs_input_grad) else None if None in needs_input_grad else False)
+    # directly create the Tensor
+    ret = Tensor.__new__(Tensor)
+    ret.uop = new_uop
+    ret.requires_grad = True if any(needs_input_grad) else None if None in needs_input_grad else False
+    ret.grad = None
+    # add to all_tensors after construction succeeds
+    all_tensors[weakref.ref(ret)] = None
+    return ret
 
   def _apply_broadcasted_uop(self, fxn:Callable, x:Tensor|ConstType, reverse=False) -> Tensor:
     lhs,rhs = self._broadcasted(x, reverse)
@@ -231,6 +242,8 @@ class Tensor(OpMixin):
     NOTE: A Tensor can only be scheduled once.
     """
     big_sink = UOp.sink(*[x.uop for x in (self,)+lst])
+
+    # this is where the schedule cache should go
     becomes_map, schedule, var_vals = complete_create_schedule_with_vars(big_sink)
     _apply_map_to_tensors(becomes_map, name="Apply Schedule Map")
     return schedule, var_vals
@@ -383,6 +396,7 @@ class Tensor(OpMixin):
     ```
     """
     assert isinstance(self.device, str), "can't shard a MultiLazyBuffer"
+    if len(devices) == 1: return self.to(devices[0])
     devices = tuple(canonicalize_device(x) for x in devices)
     mlb = self.uop.shard(devices, self._resolve_dim(axis)) if axis is not None else self.uop.copy_to_device(devices)
     return Tensor(mlb, device=devices, requires_grad=self.requires_grad)
@@ -1242,6 +1256,9 @@ class Tensor(OpMixin):
     else: # no copy, basic setitem
       v = v.cast(res.dtype)._broadcast_to(_broadcast_shape(res.shape, v.shape)).contiguous()
       res.assign(v).realize()
+
+  def __delitem__(self, indices) -> None:
+    raise TypeError("Tensor does not support deleting items")
 
   def gather(self:Tensor, dim:int, index:Tensor) -> Tensor:
     """
@@ -3008,8 +3025,8 @@ class Tensor(OpMixin):
     ```
     """
     if min_ is None and max_ is None: raise RuntimeError("at least one of 'min_' or 'max_' must not be None")
-    ret = self.maximum(min_) if min_ is not None else self
-    return ret.minimum(max_) if max_ is not None else ret
+    ret = (self < min_).where(min_, self) if min_ is not None else self
+    return (ret > max_).where(max_, ret) if max_ is not None else ret
 
   def clip(self, min_=None, max_=None) -> Tensor:
     """
@@ -3553,6 +3570,19 @@ class Tensor(OpMixin):
 
   def __eq__(self, x) -> Tensor: return self.eq(x)                      # type: ignore[override]
 
+  # ***** encoding/decoding ops *****
+
+  def decode_hevc_frame(self, frame_pos:Variable, shape:tuple[int,...], state:Tensor, ref_frames:list[Tensor]|None=None) -> Tensor:
+    """
+    Creates a Tensor by decoding an HEVC frame chunk.
+
+    You must provide the output shape of the decoded data (`shape`), the HEVC context (`vstate`), and, if required by the chunk,
+    the reference frames (`ref_frames`).
+    """
+    ref_frames = [x.contiguous() for x in ref_frames or []]
+    assert isinstance(frame_pos, Variable), "frame_pos must be a Variable"
+    return self.contiguous()._apply_uop(UOp.encdec, state.contiguous(), *ref_frames, extra_args=(frame_pos,), arg=(shape,))
+
   # ***** functional nn ops *****
 
   def linear(self, weight:Tensor, bias:Tensor|None=None, dtype:DTypeLike|None=None) -> Tensor:
@@ -3682,6 +3712,11 @@ class Tensor(OpMixin):
     """
     # NOTE: it also works when `key` and `value` have symbolic shape.
     assert all_int(self.shape), f"does not support symbolic shape {self.shape}"
+
+    if getenv("FLASH_ATTENTION"):
+      from extra.thunder.tiny.fa import flash_attention
+      return flash_attention(self, key, value, attn_mask=attn_mask, is_causal=is_causal)
+
     # GQA: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
     if enable_gqa:
       key = key.repeat_interleave(self.shape[-3] // key.shape[-3], dim=-3)
