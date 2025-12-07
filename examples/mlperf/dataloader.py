@@ -807,10 +807,6 @@ class FluxDataset:
       if "image" in sample and sample["image"] is None:
         continue
 
-      # NOTE: might need to set seed somewhere else
-      # Classifier-free guidance: Replace some of the strings with empty strings.
-      # Distinct random seed is initialized at the beginning of training for each FSDP rank.
-
       if self.classifier_free_guidance_prob > 0 and random.random() < self.classifier_free_guidance_prob:
         if "t5_encodings" in sample:
           sample["drop_encodings"] = True
@@ -835,14 +831,16 @@ class FluxDataset:
   def _deserialize_data(self, data: bytes) -> Tensor:
     return Tensor(np.load(io.BytesIO(data))).bitcast(dtypes.bfloat16)
 
-# mlperf implementation uses hf's `datasets` library to load the dataset files (https://github.com/pytorch/torchtitan/blob/21c4098d3564570ccfcda6aca97d2c4bde54020f/torchtitan/experiments/flux/dataset/flux_dataset.py#L197)
-def batch_load_flux1(base_dir:Path):
+def batch_load_flux1(base_dir:Path, batch_size:int):
   from datasets import load_from_disk
 
   dataset = FluxDataset(load_from_disk(base_dir))
-  return dataset
-  # test out by iterating through it
-  # write a complete Dataset class for it and iterate through it here.
+  batch = []
+  for sample in dataset:
+    if len(batch) < batch_size:
+      batch.append(sample)
+    else:
+      yield batch
 
 if __name__ == "__main__":
   def load_unet3d(val):
@@ -885,9 +883,8 @@ if __name__ == "__main__":
     print(f"min seq length: {min_}")
 
   def load_flux1(val):
-    dataset = batch_load_flux1(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"))
-    for s in dataset:
-      print(s)
+    for sample in batch_load_flux1(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"), 8):
+      print(f"sample: {sample}")
 
   load_fn_name = f"load_{getenv('MODEL', 'resnet')}"
   if load_fn_name in globals():
