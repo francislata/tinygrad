@@ -788,35 +788,26 @@ def batch_load_llama3(bs:int, samples:int, seqlen:int, base_dir:Path, seed:int=0
 # flux.1
 
 class FluxDataset:
-  def __init__(self, dataset, classifer_free_guidance_prob:float=0.1):
+  def __init__(self, dataset, seed:int|None=None, classifer_free_guidance_prob:float=0.1):
     self.dataset = dataset
+    self.rng = random.Random(seed)
     self.classifier_free_guidance_prob = classifer_free_guidance_prob
 
-  def __iter__(self):
-    iterator = iter(self.dataset)
+  def __getitem__(self, idx):
+    sample = self.dataset[idx]
+    sample = self._preprocess_data(sample)
+    if self.classifier_free_guidance_prob > 0.0 and self.rng.random() < self.classifier_free_guidance_prob:
+      if "t5_encodings" in sample:
+        sample["drop_encodings"] = True
+    else:
+      if "t5_encodings" in sample:
+        sample["drop_encodings"] = False
 
-    while True:
-      try:
-        sample = next(iterator)
-      except StopIteration:
-        break
+    labels = sample.pop("image") if "image" in sample else (sample.pop("mean"), sample.pop("logvar"))
+    return sample, labels
 
-      sample = self._preprocess_data(sample)
-
-      # skip low quality image or image with color channel = 1
-      if "image" in sample and sample["image"] is None:
-        continue
-
-      if self.classifier_free_guidance_prob > 0.0 and random.random() < self.classifier_free_guidance_prob:
-        if "t5_encodings" in sample:
-          sample["drop_encodings"] = True
-      else:
-        if "t5_encodings" in sample:
-          sample["drop_encodings"] = False
-
-      labels = sample.pop("image") if "image" in sample else  (sample.pop("mean"), sample.pop("logvar"))
-
-      yield sample, labels
+  def __len__(self):
+    return len(self.dataset)
 
   def _preprocess_data(self, sample:dict[str, Any]) -> dict[str, Tensor]:
     sample = sample.copy()
@@ -831,10 +822,10 @@ class FluxDataset:
   def _deserialize_data(self, data: bytes) -> Tensor:
     return Tensor(np.load(io.BytesIO(data))).bitcast(dtypes.bfloat16)
 
-def batch_load_flux1(base_dir:Path, batch_size:int):
+def batch_load_flux1(base_dir:Path, batch_size:int, seed:int|None=None):
   from datasets import load_from_disk
 
-  dataset = FluxDataset(load_from_disk(base_dir))
+  dataset = FluxDataset(load_from_disk(base_dir), seed=seed)
   batch = []
   for sample in dataset:
     if len(batch) < batch_size:
@@ -883,9 +874,11 @@ if __name__ == "__main__":
     print(f"min seq length: {min_}")
 
   def load_flux1(val):
-    random.seed(0)
-    for sample in batch_load_flux1(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"), 8):
-      pass
+    bs = 4
+    seed = 1234
+
+    for sample in batch_load_flux1(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"), bs, seed=seed):
+      print(len(sample))
 
   load_fn_name = f"load_{getenv('MODEL', 'resnet')}"
   if load_fn_name in globals():
