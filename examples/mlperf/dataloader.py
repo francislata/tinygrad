@@ -788,7 +788,7 @@ def batch_load_llama3(bs:int, samples:int, seqlen:int, base_dir:Path, seed:int=0
 # flux.1
 
 class FluxDataset:
-  def __init__(self, dataset, classifer_free_guidance_prob=0.1):
+  def __init__(self, dataset, classifer_free_guidance_prob:float=0.1):
     self.dataset = dataset
     self.classifier_free_guidance_prob = classifer_free_guidance_prob
 
@@ -807,7 +807,7 @@ class FluxDataset:
       if "image" in sample and sample["image"] is None:
         continue
 
-      if self.classifier_free_guidance_prob > 0 and random.random() < self.classifier_free_guidance_prob:
+      if self.classifier_free_guidance_prob > 0.0 and random.random() < self.classifier_free_guidance_prob:
         if "t5_encodings" in sample:
           sample["drop_encodings"] = True
       else:
@@ -883,8 +883,9 @@ if __name__ == "__main__":
     print(f"min seq length: {min_}")
 
   def load_flux1(val):
+    random.seed(0)
     for sample in batch_load_flux1(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"), 8):
-      print(f"sample: {sample}")
+      pass
 
   load_fn_name = f"load_{getenv('MODEL', 'resnet')}"
   if load_fn_name in globals():
