@@ -1,5 +1,5 @@
 import os, random, pickle, queue, struct, math, functools, hashlib, time
-from typing import List, Any
+from typing import List, Generator
 from pathlib import Path
 from multiprocessing import Queue, Process, shared_memory, connection, Lock, cpu_count
 
@@ -793,7 +793,7 @@ class FluxDataset:
     self.rng = random.Random(seed)
     self.classifier_free_guidance_prob = classifer_free_guidance_prob
 
-  def __getitem__(self, idx:int) -> tuple[dict[str, Tensor|str], Any]|None:
+  def __getitem__(self, idx:int) -> tuple[dict[str, Tensor|str], tuple[Tensor, Tensor]]|None:
     sample = self.dataset[idx]
     sample = self._preprocess_data(sample)
 
@@ -814,7 +814,7 @@ class FluxDataset:
   def __len__(self) -> int:
     return len(self.dataset)
 
-  def _preprocess_data(self, sample:dict[str, Any]) -> dict[str, Tensor]:
+  def _preprocess_data(self, sample:dict[str, str|bytes]) -> dict[str, Tensor]:
     sample = sample.copy()
 
     sample["id"] = sample.pop("__key__")
@@ -825,19 +825,32 @@ class FluxDataset:
 
     return sample
 
-  def _deserialize_data(self, data: bytes) -> Tensor:
+  def _deserialize_data(self, data:bytes) -> Tensor:
     return Tensor(np.load(io.BytesIO(data))).bitcast(dtypes.bfloat16)
 
-def batch_load_flux1(base_dir:Path, batch_size:int, seed:int|None=None):
+def batch_load_flux1(base_dir:Path, batch_size:int, seed:int|None=None) -> Generator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor], None, None]:
   from datasets import load_from_disk
 
   dataset = FluxDataset(load_from_disk(base_dir), seed=seed)
-  batch = []
+  t5_encodings, clip_encodings, drop_encodings, mean, logvar = [], [], [], [], []
+
   for sample in dataset:
-    if len(batch) < batch_size:
-      batch.append(sample)
-    else:
-      yield batch
+    t5_encodings.append(sample[0]["t5_encodings"])
+    clip_encodings.append(sample[0]["clip_encodings"])
+    drop_encodings.append(Tensor(sample[0]["drop_encodings"]))
+    mean.append(sample[1][0])
+    logvar.append(sample[1][1])
+
+    if len(t5_encodings) == batch_size:
+      yield (
+        Tensor.stack(*t5_encodings),
+        Tensor.stack(*clip_encodings),
+        Tensor.stack(*drop_encodings),
+        Tensor.stack(*mean),
+        Tensor.stack(*logvar)
+      )
+
+      t5_encodings, clip_encodings, drop_encodings, mean, logvar = [], [], [], [], []
 
 if __name__ == "__main__":
   def load_unet3d(val):
@@ -883,8 +896,8 @@ if __name__ == "__main__":
     bs = 4
     seed = 1234
 
-    for sample in batch_load_flux1(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"), bs, seed=seed):
-      print(sample)
+    for t5_encodings, clip_encodings, drop_encodings, mean, logvar in batch_load_flux1(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"), bs, seed=seed):
+      print(f"{t5_encodings.shape=}, {clip_encodings.shape=}, {drop_encodings.shape=}, {mean.shape=}, {logvar.shape=}")
 
   load_fn_name = f"load_{getenv('MODEL', 'resnet')}"
   if load_fn_name in globals():
