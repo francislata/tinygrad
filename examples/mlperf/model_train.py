@@ -12,6 +12,7 @@ from examples.mlperf.helpers import get_training_state, load_training_state
 from extra.bench_log import BenchEvent, WallTimeEvent
 # TODO: fix benchmark logging and use tinygrad tqdm
 from tqdm import tqdm
+from typing import Iterator
 
 def train_resnet():
   from extra.models import resnet
@@ -359,7 +360,6 @@ def train_retinanet():
   from pycocotools.coco import COCO
   from pycocotools.cocoeval import COCOeval
   from tinygrad.helpers import colored
-  from typing import Iterator
 
   import numpy as np
 
@@ -1639,12 +1639,17 @@ def train_stable_diffusion():
     t6 = time.perf_counter()
 
 def train_flux1():
+  from examples.mlperf.dataloader import batch_load_flux1
+
   config = {}
+
+  BASEDIR = Path(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"))
 
   GPUS = config["gpus"] = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 1))]
   SEED = config["seed"] = getenv("SEED")
   NUM_STEPS = config["num_steps"] = getenv("NUM_STEPS", 30000)
   seq_len = config["seq_len"] = 256
+  num_samples = config["num_samples"] = 1099776
 
   # hyperparameters
   batch_size = config["batch_size"] = getenv("BS", 16)
@@ -1658,6 +1663,15 @@ def train_flux1():
   if wandb:
     import wandb
     wandb.init(config=config, project="MLPerf-flux.1")
+
+  def get_train_iter() -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
+    return batch_load_flux1(BASEDIR, batch_size, seed=SEED)
+
+  train_iter = get_train_iter()
+
+  # training loop
+  for t5_enc, clip_enc, drop_enc, mean, logvar in tqdm(train_iter, total=num_samples//batch_size):
+    pass
 
 if __name__ == "__main__":
   multiprocessing.set_start_method('spawn')
