@@ -793,9 +793,14 @@ class FluxDataset:
     self.rng = random.Random(seed)
     self.classifier_free_guidance_prob = classifer_free_guidance_prob
 
-  def __getitem__(self, idx):
+  def __getitem__(self, idx:int) -> tuple[dict[str, Tensor|str], Any]|None:
     sample = self.dataset[idx]
     sample = self._preprocess_data(sample)
+
+    if "image" in sample and sample["image"] is None:
+      print(f"Low quality image {sample['id']} is skipped in FluxDataset")
+      return None
+
     if self.classifier_free_guidance_prob > 0.0 and self.rng.random() < self.classifier_free_guidance_prob:
       if "t5_encodings" in sample:
         sample["drop_encodings"] = True
@@ -806,12 +811,13 @@ class FluxDataset:
     labels = sample.pop("image") if "image" in sample else (sample.pop("mean"), sample.pop("logvar"))
     return sample, labels
 
-  def __len__(self):
+  def __len__(self) -> int:
     return len(self.dataset)
 
   def _preprocess_data(self, sample:dict[str, Any]) -> dict[str, Tensor]:
     sample = sample.copy()
 
+    sample["id"] = sample.pop("__key__")
     sample["t5_encodings"] = self._deserialize_data(sample["t5_encodings"])
     sample["clip_encodings"] = self._deserialize_data(sample["clip_encodings"])
     sample["mean"] = self._deserialize_data(sample["mean"])
@@ -878,7 +884,7 @@ if __name__ == "__main__":
     seed = 1234
 
     for sample in batch_load_flux1(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"), bs, seed=seed):
-      print(len(sample))
+      print(sample)
 
   load_fn_name = f"load_{getenv('MODEL', 'resnet')}"
   if load_fn_name in globals():
