@@ -1643,20 +1643,18 @@ def train_flux1():
 
   config = {}
 
-  BASEDIR = Path(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"))
+  GPUS = config["GPUS"] = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 6))]
+  SEED = config["SEED"] = getenv("SEED")
+  NUM_STEPS = config["NUM_STEPS"] = getenv("NUM_STEPS", 30000)
+  SEQ_LEN = config["seq_len"] = getenv("SEQ_LEN", 256)
+  BS = config["BS"] = getenv("BS", 16)
 
-  GPUS = config["gpus"] = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 1))]
-  SEED = config["seed"] = getenv("SEED")
-  NUM_STEPS = config["num_steps"] = getenv("NUM_STEPS", 30000)
-  seq_len = config["seq_len"] = 256
-  num_samples = config["num_samples"] = 1099776
-
-  # hyperparameters
-  batch_size = config["batch_size"] = getenv("BS", 16)
-  lr = config["lr"] = 1e-4
-  lr_eps = config["lr_eps"] = 1e-8
-  lr_warmup_steps = config["lr_warmup_steps"] = 0
-  lr_decay_ratio = config["lr_decay_ratio"] = 0.0
+  base_dir = Path(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"))
+  num_samples = 1099776
+  lr = 1e-4
+  lr_eps = 1e-8
+  lr_warmup_steps = 0
+  lr_decay_ratio = 0.0
 
   # wandb
   wandb = getenv("WANDB")
@@ -1665,12 +1663,12 @@ def train_flux1():
     wandb.init(config=config, project="MLPerf-flux.1")
 
   def get_train_iter() -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
-    return batch_load_flux1(BASEDIR, batch_size, seed=SEED)
+    return batch_load_flux1(base_dir, BS, seed=SEED)
 
   train_iter = get_train_iter()
 
   # training loop
-  for t5_enc, clip_enc, drop_enc, mean, logvar in tqdm(train_iter, total=num_samples//batch_size):
+  for t5_enc, clip_enc, drop_enc, mean, logvar in tqdm(train_iter, total=num_samples//BS):
     pass
 
 if __name__ == "__main__":
