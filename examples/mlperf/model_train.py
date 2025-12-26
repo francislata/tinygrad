@@ -1640,6 +1640,7 @@ def train_stable_diffusion():
 
 def train_flux1():
   from examples.mlperf.dataloader import batch_load_flux1
+  from extra.models.flux1 import Flux
 
   config = {}
 
@@ -1656,14 +1657,31 @@ def train_flux1():
   lr_warmup_steps = 0
   lr_decay_ratio = 0.0
 
+  def get_train_iter() -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
+    return batch_load_flux1(base_dir, BS, seed=SEED)
+
   # wandb
   wandb = getenv("WANDB")
   if wandb:
     import wandb
     wandb.init(config=config, project="MLPerf-flux.1")
 
-  def get_train_iter() -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
-    return batch_load_flux1(base_dir, BS, seed=SEED)
+  # model
+  model_params = {
+    "guidance_embed": True,
+    "in_channels": 64,
+    "vec_in_dim": 768,
+    "context_in_dim": 4096,
+    "hidden_size": 3072,
+    "mlp_ratio": 4.0,
+    "num_heads": 24,
+    "depth": 19,
+    "depth_single_blocks": 38,
+    "axes_dim": [16, 56, 56],
+    "theta": 10000,
+    "qkv_bias": True
+  }
+  model = Flux(**model_params)
 
   train_iter = get_train_iter()
 
