@@ -1660,6 +1660,15 @@ def train_flux1():
   def get_train_iter() -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
     return batch_load_flux1(base_dir, BS, seed=SEED)
 
+  def preprocess_labels(mean:Tensor, logvar:Tensor, ae_shift:float=0.1159, ae_scale:float=0.3611) -> Tensor:
+    std = Tensor.exp(0.5 * logvar)
+    eps = Tensor.randn_like(mean)
+    z_sampled = mean + std * eps
+    return (z_sampled - ae_shift) * ae_scale
+
+  def train_step(model:Flux, t5_enc:Tensor, clip_enc:Tensor, drop_enc:Tensor, mean:Tensor, logvar:Tensor) -> Tensor:
+    labels = preprocess_labels(mean, logvar)
+
   # wandb
   wandb = getenv("WANDB")
   if wandb:
@@ -1682,6 +1691,8 @@ def train_flux1():
     "qkv_bias": True
   }
   model = Flux(**model_params)
+  model.init_weights()
+  # TODO: shard model weights
 
   train_iter = get_train_iter()
 

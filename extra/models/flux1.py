@@ -341,7 +341,7 @@ class Flux:
 
     return self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
 
-  def _init_weights(self):
+  def init_weights(self):
     self.img_in.weight = Tensor.glorot_uniform(*self.img_in.weight.shape)
     self.img_in.bias = Tensor.zeros_like(self.img_in.bias)
 
