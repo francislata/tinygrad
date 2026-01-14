@@ -1,4 +1,4 @@
-import os, mmap, array, functools, ctypes, select, contextlib, dataclasses, sys, errno, itertools
+import os, mmap, array, functools, ctypes, select, contextlib, dataclasses, sys, itertools
 from typing import cast, ClassVar
 from tinygrad.helpers import round_up, getenv, OSX, temp, ceildiv
 from tinygrad.runtime.autogen import libc, vfio, pci
@@ -93,11 +93,12 @@ class _System:
     if data is not None: sysmem_view[:len(data)] = data
     return sysmem_view, [p + i for p, sz in paddrs for i in range(0, sz, 0x1000)][:ceildiv(size, 0x1000)]
 
-  def pci_scan_bus(self, target_vendor:int, target_devices:list[tuple[int, list[int]]]) -> list[str]:
+  def pci_scan_bus(self, target_vendor:int, target_devices:list[tuple[int, list[int]]], base_class:int|None=None) -> list[str]:
     result = []
     for pcibus in FileIOInterface("/sys/bus/pci/devices").listdir():
       vendor = int(FileIOInterface(f"/sys/bus/pci/devices/{pcibus}/vendor").read(), 16)
       device = int(FileIOInterface(f"/sys/bus/pci/devices/{pcibus}/device").read(), 16)
+      if base_class is not None and int(FileIOInterface(f"/sys/bus/pci/devices/{pcibus}/class").read(), 16) >> 16 != base_class: continue
       if vendor == target_vendor and any((device & mask) in devlist for mask, devlist in target_devices): result.append(pcibus)
     return sorted(result)
 
@@ -172,17 +173,16 @@ class PCIDevice:
     self.lock_fd = System.flock_acquire(f"{devpref.lower()}_{pcibus.lower()}.lock")
     self.pcibus, self.irq_poller = pcibus, None
 
+    try: FileIOInterface(f"/sys/bus/pci/devices/{self.pcibus}/enable", os.O_RDWR)
+    except PermissionError: raise PermissionError(f"Cannot access PCI device {pcibus}: run `extra/amdpci/setup_python_cap.sh` or use sudo")
+
     if FileIOInterface.exists(f"/sys/bus/pci/devices/{self.pcibus}/driver"):
       FileIOInterface(f"/sys/bus/pci/devices/{self.pcibus}/driver/unbind", os.O_WRONLY).write(self.pcibus)
 
     for i in resize_bars or []:
       if FileIOInterface.exists(rpath:=f"/sys/bus/pci/devices/{self.pcibus}/resource{i}_resize"):
         try: FileIOInterface(rpath, os.O_RDWR).write(str(int(FileIOInterface(rpath, os.O_RDONLY).read(), 16).bit_length() - 1))
-        except OSError as e:
-          if e.errno in {errno.EPERM, errno.EACCES}:
-            raise RuntimeError(f"Cannot resize BAR {i}: {e}. Permission error: run `extra/amdpci/setup_python_cap.sh`"
-                                " to allow python accessing device or run with sudo") from e
-          raise RuntimeError(f"Cannot resize BAR {i}: {e}. Ensure the resizable BAR option is enabled on your system.") from e
+        except OSError as e: raise RuntimeError(f"Cannot resize BAR {i}: {e}. Ensure the resizable BAR option is enabled.") from e
 
     if getenv("VFIO", 0) and (vfio_fd:=System.vfio) is not None:
       FileIOInterface(f"/sys/bus/pci/devices/{self.pcibus}/driver_override", os.O_WRONLY).write("vfio-pci")
@@ -247,9 +247,9 @@ class LNXPCIIfaceBase:
   dev_impl:PCIDevImplBase
   gpus:ClassVar[list[str]] = []
 
-  def __init__(self, dev, dev_id, vendor, devices:list[tuple[int, list[int]]], bars, vram_bar, va_start, va_size):
+  def __init__(self, dev, dev_id, vendor, devices:list[tuple[int, list[int]]], bars, vram_bar, va_start, va_size, base_class:int|None=None):
     if len((cls:=type(self)).gpus) == 0:
-      cls.gpus = hcq_filter_visible_devices(System.pci_scan_bus(vendor, devices))
+      cls.gpus = hcq_filter_visible_devices(System.pci_scan_bus(vendor, devices, base_class))
 
       # Acquire va range to avoid collisions.
       FileIOInterface.anon_mmap(va_start, va_size, 0, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, 0)
@@ -290,9 +290,9 @@ class LNXPCIIfaceBase:
     self.dev_impl.mm.map_range(cast(int, b.va_addr), round_up(b.size, 0x1000), paddrs, aspace=aspace, snooped=snooped, uncached=uncached)
 
 class APLPCIIfaceBase(LNXPCIIfaceBase):
-  def __init__(self, dev, dev_id, vendor, devices, bars, vram_bar, va_start, va_size):
+  def __init__(self, dev, dev_id, vendor, devices, bars, vram_bar, va_start, va_size, base_class:int|None=None):
     self.pci_dev, self.dev, self.vram_bar = APLPCIDevice(dev.__class__.__name__[:2], pcibus=f'usb4:{dev_id}', bars=bars), dev, vram_bar
-    assert (read_vendor:=self.pci_dev.read_config(0x00, 2)) == vendor, f"Vendor ID mismatch: expected {vendor:#x}, got {read_vendor:#x}"
+    assert (read_vendor:=self.pci_dev.read_config(pci.PCI_VENDOR_ID, 2)) == vendor, f"Vendor ID mismatch: expected {vendor:#x}, got {read_vendor:#x}"
   def map(self, b:HCQBuffer): raise RuntimeError(f"map failed: {b.owner} -> {self.dev}")
 
 PCIIfaceBase:type = APLPCIIfaceBase if OSX else LNXPCIIfaceBase

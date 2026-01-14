@@ -140,6 +140,8 @@ def option(s:int|None) -> int: return 0 if s is None else s+1
 device_ts_diffs:dict[str, tuple[Decimal, Decimal]] = {}
 def cpu_ts_diff(device:str, thread=0) -> Decimal: return device_ts_diffs.get(device, (Decimal(0),))[thread]
 
+device_props:dict[str, dict] = {}
+
 DevEvent = ProfileRangeEvent|ProfileGraphEntry|ProfilePointEvent
 def flatten_events(profile:list[ProfileEvent]) -> Generator[tuple[Decimal, Decimal, DevEvent], None, None]:
   for e in profile:
@@ -241,13 +243,11 @@ def load_counters(profile:list[ProfileEvent]) -> None:
   counter_events:dict[tuple[str, int], dict] = {}
   durations:dict[str, list[float]] = {}
   prg_events:dict[str, ProfileProgramEvent] = {}
-  dev_events:dict[str, ProfileDeviceEvent] = {}
   for e in profile:
     if isinstance(e, (ProfilePMCEvent, ProfileSQTTEvent)): counter_events.setdefault((e.kern, e.exec_tag), {}).setdefault(type(e), []).append(e)
     if isinstance(e, ProfileRangeEvent) and e.device.startswith("AMD") and e.en is not None:
       durations.setdefault(str(e.name), []).append(float(e.en-e.st))
     if isinstance(e, ProfileProgramEvent): prg_events[str(e.name)] = e
-    if isinstance(e, ProfileDeviceEvent): dev_events[e.device] = e
   if len(counter_events) == 0: return None
   ctxs.append({"name":"All Counters", "steps":[create_step("PMC", ("/all-pmc", len(ctxs), 0), (durations, all_counters:={}))]})
   run_number = {n:0 for n,_ in counter_events}
@@ -261,20 +261,21 @@ def load_counters(profile:list[ProfileEvent]) -> None:
       all_counters[(name, run_number[k], k)] = pmc[0]
     if (sqtt:=v.get(ProfileSQTTEvent)):
       # to decode a SQTT trace, we need the raw stream, program binary and device properties
-      steps.append(create_step("SQTT", ("/prg-sqtt", len(ctxs), len(steps)), ((k, tag), [*sqtt, prg_events[k], dev_events[sqtt[0].device]])))
+      steps.append(create_step("SQTT", ("/prg-sqtt", len(ctxs), len(steps)), ((k, tag), sqtt, prg_events[k])))
       if getenv("SQTT_PARSE"):
         # run our decoder on startup, we don't use this since it only works on gfx11
         from extra.sqtt.attempt_sqtt_parse import parse_sqtt_print_packets
         for e in sqtt: parse_sqtt_print_packets(e.blob)
-    ctxs.append({"name":f"Exec {name} n{run_number[k]}", "steps":steps})
+    ctxs.append({"name":f"Exec {name}"+(f" n{run_number[k]}" if run_number[k] > 1 else ""), "steps":steps})
 
 # ** SQTT OCC only unpacks wave start, end time and SIMD location
 
-def unpack_sqtt(key:tuple[str, int], profile:list[ProfileEvent]) -> tuple[dict[str, list[ProfileEvent]], list[str], dict[str, dict[str, dict]]]:
+def unpack_sqtt(key:tuple[str, int], data:list, p:ProfileProgramEvent) -> tuple[dict[str, list[ProfileEvent]], list[str], dict[str, dict[str, dict]]]:
   # * init decoder
   from extra.sqtt.roc import decode
-  rctx = decode(profile)
-  disasm = rctx.disasms[key[0]]
+  base = unwrap(p.base)
+  disasm = {addr+base:inst_disasm for addr,inst_disasm in llvm_disasm(device_props[p.device]["gfx_target_version"], unwrap(p.lib)).items()}
+  rctx = decode(data, {p.name:disasm})
   cu_events:dict[str, list[ProfileEvent]] = {}
   # * INST waves
   wave_insts:dict[str, dict[str, dict]] = {}
@@ -284,7 +285,7 @@ def unpack_sqtt(key:tuple[str, int], profile:list[ProfileEvent]) -> tuple[dict[s
     n = next(inst_units[u])
     if (events:=cu_events.get(w.cu_loc)) is None: cu_events[w.cu_loc] = events = []
     events.append(ProfileRangeEvent(w.simd_loc, loc:=f"INST WAVE:{w.wave_id} N:{n}", Decimal(w.begin_time), Decimal(w.end_time)))
-    wave_insts.setdefault(w.cu_loc, {})[f"{u} N:{n}"] = {"wave":w, "disasm":disasm, "run_number":n, "loc":loc}
+    wave_insts.setdefault(w.cu_loc, {})[f"{u} N:{n}"] = {"wave":w, "disasm":disasm, "prg":p, "run_number":n, "loc":loc}
   # * OCC waves
   units:dict[str, itertools.count] = {}
   wave_start:dict[str, int] = {}
@@ -309,6 +310,7 @@ def get_profile(profile:list[ProfileEvent], sort_fn:Callable[[str], Any]=device_
   for ev in profile:
     if isinstance(ev, ProfileDeviceEvent):
       device_ts_diffs[ev.device] = (ev.comp_tdiff,ev.copy_tdiff if ev.copy_tdiff is not None else ev.comp_tdiff)
+      if ev.props is not None: device_props[ev.device] = ev.props
       if (d:=ev.device.split(":")[0]) == "AMD": device_decoders[d] = load_counters
   # load device specific counters
   for fxn in device_decoders.values(): fxn(profile)
@@ -358,7 +360,7 @@ def amd_readelf(lib:bytes) -> list[dict]:
           ".group_segment_fixed_size":"LDS size", ".private_segment_fixed_size":"Scratch size"}
   return [{"label":label, "value":v} for k,label in keys.items() if (v:=notes["amdhsa.kernels"][0][k]) > 0]
 
-def llvm_disasm(arch:str, lib:bytes) -> dict[int, tuple[str, int]]:
+def llvm_disasm(target:int, lib:bytes) -> dict[int, tuple[str, int]]:
   from tinygrad.runtime.autogen import llvm
   from tinygrad.runtime.support.elf import elf_loader
   llvm.LLVMInitializeAMDGPUTargetInfo()
@@ -367,6 +369,7 @@ def llvm_disasm(arch:str, lib:bytes) -> dict[int, tuple[str, int]]:
   llvm.LLVMInitializeAMDGPUDisassembler()
   # pass NULL to callbacks
   cbs = [ctypes.cast(0, llvm.LLVMCreateDisasmCPUFeatures.argtypes[i]) for i in {5,6}]
+  arch = "gfx%d%x%x" % (target // 10000, (target // 100) % 100, target % 100)
   ctx = llvm.LLVMCreateDisasmCPUFeatures("amdgcn-amd-amdhsa".encode(), arch.encode(), "".encode(), None, 0, *cbs)
   image, sections, _ = elf_loader(lib)
   text = next((sh.header for sh in sections if sh.name == ".text"), None)
@@ -390,11 +393,19 @@ def parse_branch(asm:str) -> int|None:
     return (x - 0x10000 if x & 0x8000 else x)*4
   return None
 
+def amdgpu_tokenize(st:str) -> list[str]:
+  try:
+    from extra.assembly.amd.dsl import s, v, Reg, VCC_LO, VCC_HI, VCC, EXEC_LO, EXEC_HI, EXEC, SCC, M0, NULL, OFF
+    from extra.assembly.amd.asm import _op2dsl
+    dsl = eval(_op2dsl(st), {'s':s, 'v':v, 'VCC_LO':VCC_LO, 'VCC_HI':VCC_HI, 'VCC':VCC, 'EXEC_LO':EXEC_LO, 'EXEC_HI':EXEC_HI, 'EXEC':EXEC,
+                             'SCC':SCC, 'M0':M0, 'NULL':NULL, 'OFF':OFF})
+    return [f"{type(dsl).__name__[0].lower()}{dsl.offset + i}" for i in range(dsl.sz)] if isinstance(dsl, Reg) else [st]
+  except (ImportError, NameError, SyntaxError, TypeError): return []
+
 COND_TAKEN, COND_NOT_TAKEN, UNCOND = range(3)
-cfg_colors = {COND_TAKEN: "#3f7564", COND_NOT_TAKEN: "#7a4540", UNCOND: "#3b5f7e"}
-def amdgpu_cfg(lib:bytes, arch:str) -> dict:
+def amdgpu_cfg(lib:bytes, target:int) -> dict:
   # disassemble
-  pc_table = llvm_disasm(arch, lib)
+  pc_table = llvm_disasm(target, lib)
   # get leaders
   leaders:set[int] = {next(iter(pc_table))}
   for pc, (asm, sz) in pc_table.items():
@@ -403,37 +414,44 @@ def amdgpu_cfg(lib:bytes, arch:str) -> dict:
   curr:int|None = None
   blocks:dict[int, list[int]] = {}
   paths:dict[int, dict[int, int]] = {}
+  lines:list[str] = []
+  asm_width = max(len(asm) for asm, _ in pc_table.values())
   for pc, (asm, sz) in pc_table.items():
+    # skip instructions only used for padding
+    if asm == "s_code_end": continue
+    lines.append(f"  {asm:<{asm_width}}  // {pc:012X}")
     if pc in leaders:
       paths[curr:=pc] = {}
       blocks[pc] = []
     else: assert curr is not None, f"no basic block found for {pc}"
     blocks[curr].append(pc)
-    # control flow ends in endpgm
-    if asm == "s_endpgm": break
     # otherwise a basic block can have exactly one or two paths
     nx = pc+sz
     if (offset:=parse_branch(asm)) is not None:
       if asm.startswith("s_branch"): paths[curr][nx+offset] = UNCOND
       else: paths[curr].update([(nx+offset, COND_TAKEN), (nx, COND_NOT_TAKEN)])
     elif nx in leaders: paths[curr][nx] = UNCOND
-  return {"blocks":blocks, "paths":paths, "pc_table":pc_table, "colors":cfg_colors}
+  pc_tokens:dict[int, list[dict]] = {}
+  for pc, (text, _) in pc_table.items():
+    pc_tokens[pc] = [{"st":s, "keys":amdgpu_tokenize(s) if i>0 else [s], "kind":int(i>0)} for i,s in enumerate(text.replace(",", " , ").split(" "))]
+  return {"data":{"blocks":blocks, "paths":paths, "pc_tokens":pc_tokens}, "src":"\n".join(lines)}
 
 # ** Main render function to get the complete details about a trace event
 
-def get_render(i:int, j:int, fmt:str) -> dict:
+def get_render(query:str) -> dict:
+  url = urlparse(query)
+  i, j, fmt = get_int(qs:=parse_qs(url.query), "ctx"), get_int(qs, "step"), url.path.lstrip("/")
   data = ctxs[i]["steps"][j]["data"]
   if fmt == "graph-rewrites": return {"value":get_full_rewrite(trace.rewrites[i][j]), "content_type":"text/event-stream"}
   if fmt == "uops": return {"src":get_stdout(lambda: print_uops(data.uops or [])), "lang":"txt"}
   if fmt == "code": return {"src":data.src, "lang":"cpp"}
   if fmt == "asm":
-    compiler = Device[data.device].compiler
     ret:dict = {"metadata":[]}
-    if data.device.startswith("AMD"):
+    if data.device.startswith("AMD") and data.lib is not None:
       with soft_err(lambda err: ret.update(err)):
-        ret["data"] = amdgpu_cfg(lib:=compiler.compile(data.src), getattr(compiler, "arch"))
+        ret.update(amdgpu_cfg(lib:=data.lib, device_props[data.device]["gfx_target_version"]))
         with soft_err(lambda err: ret["metadata"].append(err)): ret["metadata"].append(amd_readelf(lib))
-    else: ret["src"] = get_stdout(lambda: compiler.disassemble(compiler.compile(data.src)))
+    else: ret["src"] = get_stdout(lambda: (compiler:=Device[data.device].compiler).disassemble(compiler.compile(data.src)))
     return ret
   if fmt == "all-pmc":
     durations, pmc = data
@@ -483,7 +501,7 @@ def get_render(i:int, j:int, fmt:str) -> dict:
       prev_instr = max(prev_instr, e.time + e.dur)
     summary = [{"label":"Total Cycles", "value":w.end_time-w.begin_time}, {"label":"SE", "value":w.se}, {"label":"CU", "value":w.cu},
                {"label":"SIMD", "value":w.simd}, {"label":"Wave ID", "value":w.wave_id}, {"label":"Run number", "value":data["run_number"]}]
-    return {"rows":[tuple(v.values()) for v in rows.values()], "cols":columns, "metadata":[summary]}
+    return {"rows":[tuple(v.values()) for v in rows.values()], "cols":columns, "metadata":[summary], "ref":ref_map.get(data["prg"].name)}
   return data
 
 # ** HTTP server
@@ -502,16 +520,17 @@ class Handler(HTTPRequestHandler):
         if url.path.endswith(".js"): content_type = "application/javascript"
         if url.path.endswith(".css"): content_type = "text/css"
       except FileNotFoundError: status_code = 404
-    elif (query:=parse_qs(url.query)):
-      render_src = get_render(get_int(query, "ctx"), get_int(query, "step"), url.path.lstrip("/"))
-      if "content_type" in render_src: ret, content_type = render_src["value"], render_src["content_type"]
-      else: ret, content_type = json.dumps(render_src).encode(), "application/json"
-      if content_type == "text/event-stream": return self.stream_json(render_src["value"])
+
     elif url.path == "/ctxs":
       lst = [{**c, "steps":[{k:v for k, v in s.items() if k != "data"} for s in c["steps"]]} for c in ctxs]
       ret, content_type = json.dumps(lst).encode(), "application/json"
     elif url.path == "/get_profile" and profile_ret: ret, content_type = profile_ret, "application/octet-stream"
-    else: status_code = 404
+    else:
+      if not (render_src:=get_render(self.path)): status_code = 404
+      else:
+        if "content_type" in render_src: ret, content_type = render_src["value"], render_src["content_type"]
+        else: ret, content_type = json.dumps(render_src).encode(), "application/json"
+        if content_type == "text/event-stream": return self.stream_json(render_src["value"])
 
     return self.send_data(ret, content_type, status_code)
 
