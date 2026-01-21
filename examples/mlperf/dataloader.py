@@ -1,5 +1,5 @@
 import os, random, pickle, queue, struct, math, functools, hashlib, time
-from typing import List, Generator
+from typing import List
 from pathlib import Path
 from multiprocessing import Queue, Process, shared_memory, connection, Lock, cpu_count
 
@@ -795,22 +795,26 @@ class FluxDataset:
     self.rng = random.Random(seed)
     self.classifier_free_guidance_prob = classifer_free_guidance_prob
 
-  def __getitem__(self, idx:int) -> tuple[dict[str, Tensor|str], tuple[Tensor, Tensor]]|None:
-    sample = self.dataset[idx]
-    sample = self._preprocess_data(sample)
+  def __iter__(self):
+    iterator = iter(self.dataset)
 
-    if "image" in sample and sample["image"] is None:
-      print(f"Low quality image {sample['id']} is skipped in FluxDataset")
-      return None
+    while True:
+      try:
+        sample = next(iterator)
+      except StopIteration:
+        iterator = iter(self.dataset)
 
-    if self.classifier_free_guidance_prob > 0.0 and self.rng.random() < self.classifier_free_guidance_prob:
-      sample["t5_encodings"] = Tensor(self.t5_empty_enc, dtype=dtypes.bfloat16)
-      sample["clip_encodings"] = Tensor(self.clip_empty_enc, dtype=dtypes.bfloat16)
+      sample = self._preprocess_data(sample)
 
-    return sample, (sample.pop("mean"), sample.pop("logvar"))
+      if "image" in sample and sample["image"] is None:
+        print(f"Low quality image {sample['id']} is skipped in FluxDataset")
+        return None
 
-  def __len__(self) -> int:
-    return len(self.dataset)
+      if self.classifier_free_guidance_prob > 0.0 and self.rng.random() < self.classifier_free_guidance_prob:
+        sample["t5_encodings"] = Tensor(self.t5_empty_enc, dtype=dtypes.bfloat16)
+        sample["clip_encodings"] = Tensor(self.clip_empty_enc, dtype=dtypes.bfloat16)
+
+      yield sample
 
   @functools.cached_property
   def t5_empty_enc(self) -> Tensor:
@@ -821,37 +825,26 @@ class FluxDataset:
     return np.load(self.empty_enc_dir / "clip_empty.npy")[0]
 
   def _preprocess_data(self, sample:dict[str, str|bytes]) -> dict[str, Tensor]:
-    sample = sample.copy()
+    if "__key__" in sample:
+      sample = sample.copy()
+      sample_id = sample.pop("__key__")
 
-    sample["id"] = sample.pop("__key__")
-    sample["t5_encodings"] = self._deserialize_data(sample["t5_encodings"])
-    sample["clip_encodings"] = self._deserialize_data(sample["clip_encodings"])
-    sample["mean"] = self._deserialize_data(sample["mean"])
-    sample["logvar"] = self._deserialize_data(sample["logvar"])
+      sample = {k: self._deserialize_data(v) for k, v in sample.items()}
+      sample["id"] = sample_id
 
     return sample
 
   def _deserialize_data(self, data:bytes) -> Tensor:
     return Tensor(np.load(io.BytesIO(data))).bitcast(dtypes.bfloat16)
 
-def batch_load_flux1(dataset:FluxDataset, batch_size:int) -> Generator[tuple[Tensor, Tensor, Tensor, Tensor], None, None]:
-  t5_encodings, clip_encodings, mean, logvar = [], [], [], []
-
-  for sample in dataset:
-    t5_encodings.append(sample[0]["t5_encodings"])
-    clip_encodings.append(sample[0]["clip_encodings"])
-    mean.append(sample[1][0])
-    logvar.append(sample[1][1])
-
-    if len(t5_encodings) == batch_size:
-      yield (
-        Tensor.stack(*t5_encodings),
-        Tensor.stack(*clip_encodings),
-        Tensor.stack(*mean),
-        Tensor.stack(*logvar)
-      )
-
-      t5_encodings, clip_encodings, mean, logvar = [], [], [], []
+def iterate_flux_dataset(dataset:FluxDataset, batch_size:int):
+  dataset_iter = iter(dataset)
+  while True:
+    batch = []
+    while len(batch) < batch_size:
+      sample = next(dataset_iter)
+      batch.append(sample)
+    yield batch
 
 if __name__ == "__main__":
   def load_unet3d(val):
@@ -898,11 +891,15 @@ if __name__ == "__main__":
 
     bs = 4
     seed = 1234
-    dataset = FluxDataset(load_from_disk(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed")), getenv("EMPTYENCDIR", "/raid/datasets/flux1/empty_encodings"), seed=seed)
+    ds = load_from_disk(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"))
+    dataset = FluxDataset(ds, getenv("EMPTYENCDIR", "/raid/datasets/flux1/empty_encodings"), seed=seed)
 
-    with tqdm(total=len(dataset)) as pbar:
-      for x in batch_load_flux1(dataset, bs):
-        pbar.update(x[0].shape[0])
+    num_samples = 0
+    for _ in tqdm(iterate_flux_dataset(dataset, bs), total=(total_num_samples := len(ds) // bs)):
+      if num_samples >= total_num_samples:
+        break
+      num_samples += 1
+
 
   load_fn_name = f"load_{getenv('MODEL', 'resnet')}"
   if load_fn_name in globals():
