@@ -804,17 +804,17 @@ class FluxDataset:
       except StopIteration:
         iterator = iter(self.dataset)
 
-      sample = self._preprocess_data(sample)
+      sample_preproc = self._preprocess_data(sample)
 
-      if "image" in sample and sample["image"] is None:
-        print(f"Low quality image {sample['id']} is skipped in FluxDataset")
+      if "image" in sample_preproc and sample_preproc["image"] is None:
+        print(f"Low quality image {sample_preproc['id']} is skipped in FluxDataset")
         return None
 
       if self.classifier_free_guidance_prob > 0.0 and self.rng.random() < self.classifier_free_guidance_prob:
-        sample["t5_encodings"] = Tensor(self.t5_empty_enc, dtype=dtypes.bfloat16)
-        sample["clip_encodings"] = Tensor(self.clip_empty_enc, dtype=dtypes.bfloat16)
+        sample_preproc["t5_encodings"] = Tensor(self.t5_empty_enc, dtype=dtypes.bfloat16)
+        sample_preproc["clip_encodings"] = Tensor(self.clip_empty_enc, dtype=dtypes.bfloat16)
 
-      yield sample
+      yield sample_preproc
 
   @functools.cached_property
   def t5_empty_enc(self) -> Tensor:
@@ -825,12 +825,11 @@ class FluxDataset:
     return np.load(self.empty_enc_dir / "clip_empty.npy")[0]
 
   def _preprocess_data(self, sample:dict[str, str|bytes]) -> dict[str, Tensor]:
-    if "__key__" in sample:
-      sample = sample.copy()
-      sample_id = sample.pop("__key__")
+    sample = sample.copy()
+    sample_id = sample.pop("__key__")
 
-      sample = {k: self._deserialize_data(v) for k, v in sample.items()}
-      sample["id"] = sample_id
+    sample = {k: self._deserialize_data(v) for k, v in sample.items()}
+    sample["id"] = sample_id
 
     return sample
 
