@@ -826,11 +826,9 @@ class FluxDataset:
 
   def _preprocess_data(self, sample:dict[str, str|bytes]) -> dict[str, Tensor]:
     sample = sample.copy()
-    sample_id = sample.pop("__key__")
+    sample.pop("__key__")
 
     sample = {k: self._deserialize_data(v) for k, v in sample.items()}
-    sample["id"] = sample_id
-
     return sample
 
   def _deserialize_data(self, data:bytes) -> Tensor:
@@ -843,6 +841,8 @@ def iterate_flux_dataset(dataset:FluxDataset, batch_size:int):
     while len(batch) < batch_size:
       sample = next(dataset_iter)
       batch.append(sample)
+
+    batch = {k: Tensor.stack(*[s[k] for s in batch]) for k in batch[0].keys()}
     yield batch
 
 if __name__ == "__main__":
