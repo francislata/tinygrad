@@ -850,11 +850,11 @@ def iterate_flux_dataset(dataset:FluxDataset, batch_size:int) -> Generator[dict[
     batch = {k: Tensor.stack(*[s[k] for s in batch]) for k in batch[0].keys()}
     yield batch
 
-def batch_load_flux(batch_size:int, base_dir:str, empty_enc_dir:str|None=None, seed:int|None=None, cfg_prob:float=0.1) -> Generator[dict[str, Tensor], None, None]:
+def batch_load_flux(batch_size:int, base_dir:str, empty_enc_dir:str|None=None, seed:int|None=None, cfg_prob:float=0.1, is_infinite:bool=True) -> Generator[dict[str, Tensor], None, None]:
   from datasets import load_from_disk
 
   ds = load_from_disk(base_dir)
-  dataset = FluxDataset(ds, empty_enc_dir, seed=seed, cfg_prob=cfg_prob)
+  dataset = FluxDataset(ds, empty_enc_dir, seed=seed, cfg_prob=cfg_prob, is_infinite=is_infinite)
   return iterate_flux_dataset(dataset, batch_size)
 
 if __name__ == "__main__":
