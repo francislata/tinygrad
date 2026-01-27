@@ -789,10 +789,11 @@ def batch_load_llama3(bs:int, samples:int, seqlen:int, base_dir:Path, seed:int=0
 # flux.1
 
 class FluxDataset:
-  def __init__(self, dataset, empty_enc_dir:str|None=None, seed:int|None=None, cfg_prob:float=0.1):
+  def __init__(self, dataset, empty_enc_dir:str|None=None, seed:int|None=None, cfg_prob:float=0.1, is_infinite:bool=True):
     self.dataset = dataset
     self.empty_enc_dir = Path(empty_enc_dir) if empty_enc_dir else None
     self.cfg_prob = cfg_prob
+    self.is_infinite = is_infinite
     self.rng = random.Random(seed)
 
   def __iter__(self):
@@ -802,7 +803,10 @@ class FluxDataset:
       try:
         sample = next(iterator)
       except StopIteration:
-        iterator = iter(self.dataset)
+        if self.is_infinite:
+          iterator = iter(self.dataset)
+        else:
+          break
 
       sample_preproc = self._preprocess_data(sample)
 
