@@ -845,6 +845,13 @@ def iterate_flux_dataset(dataset:FluxDataset, batch_size:int):
     batch = {k: Tensor.stack(*[s[k] for s in batch]) for k in batch[0].keys()}
     yield batch
 
+def batch_load_flux(batch_size:int, base_dir:str, empty_enc_dir:str, seed:int|None=None):
+  from datasets import load_from_disk
+
+  ds = load_from_disk(base_dir)
+  dataset = FluxDataset(ds, empty_enc_dir, seed=seed)
+  return iterate_flux_dataset(dataset, batch_size)
+
 if __name__ == "__main__":
   def load_unet3d(val):
     assert not val, "validation set is not supported due to different sizes on inputs"
@@ -886,18 +893,14 @@ if __name__ == "__main__":
     print(f"min seq length: {min_}")
 
   def load_flux1(val):
-    from datasets import load_from_disk
-
-    bs = 4
+    bs = getenv("BS", 4)
     seed = 1234
-    dataset = FluxDataset(
-      (ds:=load_from_disk(getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed"))),
-      getenv("EMPTYENC_DIR", "/raid/datasets/flux1/empty_encodings"),
-      seed=seed
-    )
+    base_dir = getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed")
+    empty_enc_dir = getenv("EMPTYENC_DIR", "/raid/datasets/flux1/empty_encodings")
+    total_num_samples = (29696 if val else 1099776) // bs
 
     num_samples = 0
-    for _ in tqdm(iterate_flux_dataset(dataset, bs), total=(total_num_samples:=len(ds) // bs)):
+    for _ in tqdm(batch_load_flux(bs, base_dir, empty_enc_dir, seed=seed), total=total_num_samples):
       if num_samples >= total_num_samples:
         break
       num_samples += 1
