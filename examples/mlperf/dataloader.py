@@ -1,5 +1,5 @@
 import os, random, pickle, queue, struct, math, functools, hashlib, time
-from typing import List
+from typing import List, Generator
 from pathlib import Path
 from multiprocessing import Queue, Process, shared_memory, connection, Lock, cpu_count
 
@@ -789,10 +789,10 @@ def batch_load_llama3(bs:int, samples:int, seqlen:int, base_dir:Path, seed:int=0
 # flux.1
 
 class FluxDataset:
-  def __init__(self, dataset, empty_enc_dir:str, seed:int|None=None, classifer_free_guidance_prob:float=0.1):
+  def __init__(self, dataset, empty_enc_dir:str|None=None, seed:int|None=None, cfg_prob:float=0.1):
     self.dataset = dataset
-    self.empty_enc_dir = Path(empty_enc_dir)
-    self.classifier_free_guidance_prob = classifer_free_guidance_prob
+    self.empty_enc_dir = Path(empty_enc_dir) if empty_enc_dir else None
+    self.cfg_prob = cfg_prob
     self.rng = random.Random(seed)
 
   def __iter__(self):
@@ -810,7 +810,8 @@ class FluxDataset:
         print(f"Low quality image {sample_preproc['id']} is skipped in FluxDataset")
         return None
 
-      if self.classifier_free_guidance_prob > 0.0 and self.rng.random() < self.classifier_free_guidance_prob:
+      if self.cfg_prob > 0.0 and self.rng.random() < self.cfg_prob:
+        assert self.empty_enc_dir is not None, f"empty_enc_dir is {self.empty_enc_dir}"
         sample_preproc["t5_encodings"] = Tensor(self.t5_empty_enc, dtype=dtypes.bfloat16)
         sample_preproc["clip_encodings"] = Tensor(self.clip_empty_enc, dtype=dtypes.bfloat16)
 
@@ -834,7 +835,7 @@ class FluxDataset:
   def _deserialize_data(self, data:bytes) -> Tensor:
     return Tensor(np.load(io.BytesIO(data))).bitcast(dtypes.bfloat16)
 
-def iterate_flux_dataset(dataset:FluxDataset, batch_size:int):
+def iterate_flux_dataset(dataset:FluxDataset, batch_size:int) -> Generator[dict[str, Tensor], None, None]:
   dataset_iter = iter(dataset)
   while True:
     batch = []
@@ -845,11 +846,11 @@ def iterate_flux_dataset(dataset:FluxDataset, batch_size:int):
     batch = {k: Tensor.stack(*[s[k] for s in batch]) for k in batch[0].keys()}
     yield batch
 
-def batch_load_flux(batch_size:int, base_dir:str, empty_enc_dir:str, seed:int|None=None):
+def batch_load_flux(batch_size:int, base_dir:str, empty_enc_dir:str|None=None, seed:int|None=None, cfg_prob:float=0.1) -> Generator[dict[str, Tensor], None, None]:
   from datasets import load_from_disk
 
   ds = load_from_disk(base_dir)
-  dataset = FluxDataset(ds, empty_enc_dir, seed=seed)
+  dataset = FluxDataset(ds, empty_enc_dir, seed=seed, cfg_prob=cfg_prob)
   return iterate_flux_dataset(dataset, batch_size)
 
 if __name__ == "__main__":
@@ -893,14 +894,15 @@ if __name__ == "__main__":
     print(f"min seq length: {min_}")
 
   def load_flux1(val):
-    bs = getenv("BS", 4)
+    BASEDIR = getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed")
+    EMPTYENC_DIR = getenv("EMPTYENC_DIR")
+
+    bs = 4
     seed = 1234
-    base_dir = getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed")
-    empty_enc_dir = getenv("EMPTYENC_DIR", "/raid/datasets/flux1/empty_encodings")
     total_num_samples = (29696 if val else 1099776) // bs
 
     num_samples = 0
-    for _ in tqdm(batch_load_flux(bs, base_dir, empty_enc_dir, seed=seed), total=total_num_samples):
+    for _ in tqdm(batch_load_flux(bs, BASEDIR, EMPTYENC_DIR, seed=seed), total=total_num_samples):
       if num_samples >= total_num_samples:
         break
       num_samples += 1
