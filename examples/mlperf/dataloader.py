@@ -792,8 +792,8 @@ class FluxDataset:
   def __init__(self, dataset, empty_enc_dir:str, seed:int|None=None, classifer_free_guidance_prob:float=0.1):
     self.dataset = dataset
     self.empty_enc_dir = Path(empty_enc_dir)
-    self.rng = random.Random(seed)
     self.classifier_free_guidance_prob = classifer_free_guidance_prob
+    self.rng = random.Random(seed)
 
   def __iter__(self):
     iterator = iter(self.dataset)
@@ -828,7 +828,7 @@ class FluxDataset:
     sample = sample.copy()
     sample.pop("__key__")
 
-    sample = {k: self._deserialize_data(v) for k, v in sample.items()}
+    sample = {k: self._deserialize_data(v) if k != "timestep" else Tensor(v) for k, v in sample.items()}
     return sample
 
   def _deserialize_data(self, data:bytes) -> Tensor:
@@ -890,11 +890,14 @@ if __name__ == "__main__":
 
     bs = 4
     seed = 1234
-    ds = load_from_disk(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"))
-    dataset = FluxDataset(ds, getenv("EMPTYENCDIR", "/raid/datasets/flux1/empty_encodings"), seed=seed)
+    dataset = FluxDataset(
+      (ds:=load_from_disk(getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed"))),
+      getenv("EMPTYENC_DIR", "/raid/datasets/flux1/empty_encodings"),
+      seed=seed
+    )
 
     num_samples = 0
-    for _ in tqdm(iterate_flux_dataset(dataset, bs), total=(total_num_samples := len(ds) // bs)):
+    for _ in tqdm(iterate_flux_dataset(dataset, bs), total=(total_num_samples:=len(ds) // bs)):
       if num_samples >= total_num_samples:
         break
       num_samples += 1
