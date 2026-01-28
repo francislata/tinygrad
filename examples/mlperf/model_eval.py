@@ -497,6 +497,18 @@ def eval_stable_diffusion():
   # for testing
   return clip_score, fid_score, ckpt_iteration
 
+def eval_flux1():
+  from tinygrad.helpers import tqdm
+  from examples.mlperf.dataloader import batch_load_flux
+
+  BS = getenv("BS", 4)
+  BASEDIR = getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed")
+
+  total_num_samples = math.ceil(29696 / BS)
+
+  for _ in tqdm(batch_load_flux(BS, BASEDIR, cfg_prob=0.0, is_infinite=False), total=total_num_samples):
+    pass
+
 if __name__ == "__main__":
   # inference only
   Tensor.training = False

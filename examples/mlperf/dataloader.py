@@ -844,9 +844,14 @@ def iterate_flux_dataset(dataset:FluxDataset, batch_size:int) -> Generator[dict[
   while True:
     batch = []
     while len(batch) < batch_size:
-      sample = next(dataset_iter)
+      try:
+        sample = next(dataset_iter)
+      except StopIteration:
+        break
+
       batch.append(sample)
 
+    if not batch: return
     batch = {k: Tensor.stack(*[s[k] for s in batch]) for k in batch[0].keys()}
     yield batch
 
@@ -899,17 +904,15 @@ if __name__ == "__main__":
 
   def load_flux1(val):
     BASEDIR = getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed")
-    EMPTYENC_DIR = getenv("EMPTYENC_DIR")
+    EMPTYENC_DIR = getenv("EMPTYENC_DIR", "")
 
     bs = 4
     seed = 1234
-    total_num_samples = (29696 if val else 1099776) // bs
+    total_num_samples = math.ceil((29696 if val else 1099776) / bs)
+    cfg_prob = 0.0 if val else 0.1
 
-    num_samples = 0
-    for _ in tqdm(batch_load_flux(bs, BASEDIR, EMPTYENC_DIR, seed=seed), total=total_num_samples):
-      if num_samples >= total_num_samples:
-        break
-      num_samples += 1
+    for _ in tqdm(batch_load_flux(bs, BASEDIR, EMPTYENC_DIR, seed=seed, cfg_prob=cfg_prob, is_infinite=False), total=total_num_samples):
+      pass
 
 
   load_fn_name = f"load_{getenv('MODEL', 'resnet')}"
