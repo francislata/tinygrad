@@ -1,6 +1,7 @@
 # RDNA3/RDNA4/CDNA disassembler
 from __future__ import annotations
 import re, struct
+from typing import Callable
 from extra.assembly.amd.dsl import Inst, Reg
 
 # Special register mappings for disassembly
@@ -101,7 +102,7 @@ def _reg(p: str, b: int, n: int = 1) -> str: return f"{p}{_unwrap(b)}" if n == 1
 def _sreg(b: int, n: int = 1) -> str: return _reg("s", _unwrap(b), n)
 def _vreg(b: int, n: int = 1) -> str: b = _unwrap(b); return _reg("v", b - 256 if b >= 256 else b, n)
 def _areg(b: int, n: int = 1) -> str: b = _unwrap(b); return _reg("a", b - 256 if b >= 256 else b, n)  # accumulator registers for GFX90a
-def _ttmp(b, n: int = 1) -> str: b = _unwrap(b); return _reg("ttmp", b - 108, n) if 108 <= b <= 123 else None
+def _ttmp(b, n: int = 1) -> str | None: b = _unwrap(b); return _reg("ttmp", b - 108, n) if 108 <= b <= 123 else None
 
 def _fmt_sdst(v, n: int = 1, cdna: bool = False) -> str:
   v = _unwrap(v)
@@ -226,7 +227,7 @@ NO_ARG_SOPP = {SOPPOp.S_BARRIER, SOPPOp.S_WAKEUP, SOPPOp.S_ICACHE_INV,
 
 def _disasm_sopp(inst: SOPP) -> str:
   name, cdna = inst.op_name.lower(), _is_cdna(inst)
-  is_rdna4 = 'rdna4' in inst.__class__.__module__
+  is_rdna4 = _is_r4(inst)
   # Ops that have no argument when simm16 == 0
   no_arg_zero = {'s_barrier', 's_wakeup', 's_icache_inv', 's_ttracedata', 's_wait_idle', 's_endpgm_saved',
                  's_endpgm_ordered_ps_done', 's_code_end'}
@@ -258,14 +259,14 @@ def _disasm_sopp(inst: SOPP) -> str:
     dep = lambda v: deps[v-1] if 0 < v <= len(deps) else str(v)
     p = [f"instid0({dep(id0)})" if id0 else "", f"instskip({skips[skip]})" if skip else "", f"instid1({dep(id1)})" if id1 else ""]
     return f"s_delay_alu {' | '.join(x for x in p if x) or '0'}"
-  if name.startswith(('s_cbranch', 's_branch')): return f"{name} 0x{inst.simm16:x}"
+  if name.startswith(('s_cbranch', 's_branch')): return f"{name} {inst.simm16}"
   return f"{name} 0x{inst.simm16:x}"
 
 def _disasm_smem(inst: SMEM) -> str:
   name, cdna = inst.op_name.lower(), _is_cdna(inst)
   if name in ('s_gl1_inv', 's_dcache_inv', 's_dcache_inv_vol', 's_dcache_wb', 's_dcache_wb_vol', 's_icache_inv'): return name
   soe, imm = getattr(inst, 'soe', 0) or getattr(inst, 'soffset_en', 0), getattr(inst, 'imm', 1)
-  is_rdna4 = 'rdna4' in inst.__class__.__module__
+  is_rdna4 = _is_r4(inst)
   offset = inst.ioffset if is_rdna4 else getattr(inst, 'offset', 0)
   if cdna:
     if soe and imm: off_s = f"{decode_src(inst.soffset, cdna)} offset:0x{offset:x}"
@@ -465,16 +466,15 @@ def _disasm_vop3sd(inst: VOP3SD) -> str:
 
 def _disasm_vopd(inst: VOPD) -> str:
   lit = inst._literal
-  is_rdna4 = 'rdna4' in inst.__class__.__module__
-  op_enum = R4_VOPDOp if is_rdna4 else VOPDOp
-  vdst_y, nx, ny = (_unwrap(inst.vdsty) << 1) | ((_unwrap(inst.vdstx) & 1) ^ 1), op_enum(inst.opx).name.lower(), op_enum(inst.opy).name.lower()
+  op_enum = R4_VOPDOp if _is_r4(inst) else VOPDOp
+  nx, ny = op_enum(inst.opx).name.lower(), op_enum(inst.opy).name.lower()
   def half(n, vd, s0, vs1):
     vd, vs1 = _vi(vd), _vi(vs1)
     if 'mov' in n: return f"{n} v{vd}, {_lit(inst, s0)}"
     if 'fmamk' in n and lit: return f"{n} v{vd}, {_lit(inst, s0)}, 0x{lit:x}, v{vs1}"
     if 'fmaak' in n and lit: return f"{n} v{vd}, {_lit(inst, s0)}, v{vs1}, 0x{lit:x}"
     return f"{n} v{vd}, {_lit(inst, s0)}, v{vs1}"
-  return f"{half(nx, inst.vdstx, inst.srcx0, inst.vsrcx1)} :: {half(ny, vdst_y, inst.srcy0, inst.vsrcy1)}"
+  return f"{half(nx, inst.vdstx, inst.srcx0, inst.vsrcx1)} :: {half(ny, inst.vdsty, inst.srcy0, inst.vsrcy1)}"
 
 def _disasm_vop3p(inst: VOP3P) -> str:
   name = inst.op_name.lower()
@@ -552,7 +552,7 @@ _HWREG_BLACKLIST_CDNA = {'HW_REG_PC_LO', 'HW_REG_PC_HI', 'HW_REG_IB_DBG1', 'HW_R
                          'HW_REG_SQ_PERF_SNAPSHOT_PC_LO', 'HW_REG_SQ_PERF_SNAPSHOT_PC_HI', 'HW_REG_XCC_ID'}
 def _disasm_sopk(inst: SOPK) -> str:
   op, name, cdna = inst.op, inst.op_name.lower(), _is_cdna(inst)
-  is_rdna4 = 'rdna4' in inst.__class__.__module__
+  is_rdna4 = _is_r4(inst)
   hw = HWREG_CDNA if cdna else (HWREG_RDNA4 if is_rdna4 else HWREG)
   blacklist = _HWREG_BLACKLIST_CDNA if cdna else _HWREG_BLACKLIST
   def fmt_hwreg(hid, hoff, hsz):
@@ -576,7 +576,7 @@ def _disasm_vinterp(inst: VINTERP) -> str:
   mods = _mods((inst.waitexp, f"wait_exp:{inst.waitexp}"), (inst.clmp, "clamp"))
   return f"{inst.op_name.lower()} {inst.vdst.fmt()}, {_lit(inst, inst.src0, inst.neg & 1)}, {_lit(inst, inst.src1, inst.neg & 2)}, {_lit(inst, inst.src2, inst.neg & 4)}" + (" " + mods if mods else "")
 
-DISASM_HANDLERS: dict[type, callable] = {
+DISASM_HANDLERS: dict[type, Callable[..., str]] = {
   VOP1: _disasm_vop1, VOP1_SDST: _disasm_vop1, VOP1_SDST_LIT: _disasm_vop1, VOP1_LIT: _disasm_vop1,
   VOP2: _disasm_vop2, VOP2_LIT: _disasm_vop2, VOPC: _disasm_vopc, VOPC_LIT: _disasm_vopc,
   VOP3: _disasm_vop3, VOP3_SDST: _disasm_vop3, VOP3_SDST_LIT: _disasm_vop3, VOP3_LIT: _disasm_vop3, VOP3SD: _disasm_vop3sd, VOP3SD_LIT: _disasm_vop3sd,
@@ -604,7 +604,7 @@ from extra.assembly.amd.autogen.cdna.ins import (VOP1 as CDNA_VOP1, VOP1_LIT as 
   VOP1_SDWA as CDNA_VOP1_SDWA, VOP1_DPP16 as CDNA_VOP1_DPP16,
   VOP2 as CDNA_VOP2, VOP2_LIT as CDNA_VOP2_LIT, VOP2_SDWA as CDNA_VOP2_SDWA, VOP2_DPP16 as CDNA_VOP2_DPP16,
   VOPC as CDNA_VOPC, VOPC_LIT as CDNA_VOPC_LIT, VOPC_SDWA_SDST as CDNA_VOPC_SDWA_SDST,
-  VOP3 as CDNA_VOP3, VOP3_SDST as CDNA_VOP3_SDST, VOP3SD as CDNA_VOP3SD, VOP3P as CDNA_VOP3P, VOP3PX2 as CDNA_VOP3PX2,
+  VOP3 as CDNA_VOP3, VOP3_SDST as CDNA_VOP3_SDST, VOP3SD as CDNA_VOP3SD, VOP3P as CDNA_VOP3P, VOP3P_MFMA as CDNA_VOP3P_MFMA, VOP3PX2 as CDNA_VOP3PX2,
   SOP1 as CDNA_SOP1, SOP1_LIT as CDNA_SOP1_LIT, SOP2 as CDNA_SOP2, SOP2_LIT as CDNA_SOP2_LIT,
   SOPC as CDNA_SOPC, SOPC_LIT as CDNA_SOPC_LIT, SOPK as CDNA_SOPK, SOPK_LIT as CDNA_SOPK_LIT,
   SOPP as CDNA_SOPP, SMEM as CDNA_SMEM, DS as CDNA_DS,
@@ -903,5 +903,5 @@ DISASM_HANDLERS.update({CDNA_VOP1: _disasm_vop1, CDNA_VOP1_LIT: _disasm_vop1,
   CDNA_SOP1: _disasm_sop1, CDNA_SOP1_LIT: _disasm_sop1, CDNA_SOP2: _disasm_sop2, CDNA_SOP2_LIT: _disasm_sop2,
   CDNA_SOPC: _disasm_sopc, CDNA_SOPC_LIT: _disasm_sopc, CDNA_SOPK: _disasm_sopk, CDNA_SOPK_LIT: _disasm_sopk, CDNA_SOPP: _disasm_sopp,
   CDNA_SMEM: _disasm_smem, CDNA_DS: _disasm_ds, CDNA_FLAT: _disasm_flat, CDNA_GLOBAL: _disasm_flat, CDNA_SCRATCH: _disasm_flat,
-  CDNA_VOP3: _disasm_vop3a, CDNA_VOP3_SDST: _disasm_vop3b, CDNA_VOP3SD: _disasm_vop3b, CDNA_VOP3P: _disasm_cdna_vop3p,
+  CDNA_VOP3: _disasm_vop3a, CDNA_VOP3_SDST: _disasm_vop3b, CDNA_VOP3SD: _disasm_vop3b, CDNA_VOP3P: _disasm_cdna_vop3p, CDNA_VOP3P_MFMA: _disasm_cdna_vop3p,
   CDNA_MUBUF: _disasm_mubuf, CDNA_VOP3PX2: _disasm_vop3px2})
