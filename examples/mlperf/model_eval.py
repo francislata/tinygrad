@@ -498,14 +498,23 @@ def eval_stable_diffusion():
   return clip_score, fid_score, ckpt_iteration
 
 def eval_flux1():
-  from tinygrad.helpers import tqdm
+  from tinygrad.helpers import tqdm, fetch
   from examples.mlperf.dataloader import batch_load_flux
+  from extra.models.flux1 import Flux
+
+  def load_model():
+    model_weights = fetch("https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors")
+    model = Flux(False)
+    state_dict = {k.replace("scale", "weight"): v for k, v in safe_load(model_weights).items()}
+    load_state_dict(model, state_dict)
+    return model
 
   BS = getenv("BS", 4)
   BASEDIR = getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed")
 
-  total_num_samples = math.ceil(29696 / BS)
+  model = load_model()
 
+  total_num_samples = math.ceil(29696 / BS)
   for _ in tqdm(batch_load_flux(BS, BASEDIR, cfg_prob=0.0, is_infinite=False), total=total_num_samples):
     pass
 
