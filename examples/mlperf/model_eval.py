@@ -500,6 +500,12 @@ def eval_stable_diffusion():
 def eval_flux1():
   from tinygrad.helpers import tqdm, fetch
   from examples.mlperf.dataloader import batch_load_flux
+  from examples.mlperf.helpers import (
+    generate_labels,
+    create_pos_enc_for_latents,
+    pack_latents,
+    unpack_latents
+  )
   from extra.models.flux1 import Flux
 
   def load_model():
@@ -509,14 +515,31 @@ def eval_flux1():
     load_state_dict(model, state_dict)
     return model
 
+  def eval_step(model:Flux, sample:dict[str, Tensor]) -> Tensor:
+    pass
+
   BS = getenv("BS", 4)
   BASEDIR = getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed")
 
   model = load_model()
 
   total_num_samples = math.ceil(29696 / BS)
-  for _ in tqdm(batch_load_flux(BS, BASEDIR, cfg_prob=0.0, is_infinite=False), total=total_num_samples):
-    pass
+  for sample in tqdm(batch_load_flux(BS, BASEDIR, cfg_prob=0.0, is_infinite=False), total=total_num_samples):
+    labels = generate_labels(sample["mean"], sample["logvar"])
+    timestep, clip_enc, t5_enc = sample.pop("timestep"), sample["clip_encodings"], sample["t5_encodings"]
+
+    noise = Tensor.randn_like(labels)
+    timestep = timestep.view(-1, 1, 1, 1)
+    sigmas = timestep / 8.0
+    latents = (1 - sigmas) * labels + sigmas * noise
+
+    b, _, latent_h, latent_w = latents.shape
+    latent_pos_enc = create_pos_enc_for_latents(b, (latent_h, latent_w))
+    text_pos_enc = Tensor.zeros(b, t5_enc.shape[1], 3)
+
+    latents = pack_latents(latents)
+
+    # loss = eval_step(model, sample)
 
 if __name__ == "__main__":
   # inference only

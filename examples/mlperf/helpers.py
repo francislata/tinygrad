@@ -368,7 +368,7 @@ class BoxCoder(object):
 
 # flux.1
 
-def generate_unscale_latent(mean:Tensor, logvar:Tensor, ae_shift_factor:float=0.1159, ae_scale_factor:float=0.3611) -> Tensor:
+def generate_labels(mean:Tensor, logvar:Tensor, ae_shift_factor:float=0.1159, ae_scale_factor:float=0.3611) -> Tensor:
   std = (0.5 * logvar).exp()
   eps = Tensor.rand_like(mean)
   z_sampled = mean + std * eps
@@ -377,7 +377,7 @@ def generate_unscale_latent(mean:Tensor, logvar:Tensor, ae_shift_factor:float=0.
 def create_pos_enc_for_latents(batch_size:int, latent_dims:tuple[int, int], pos_dim:int=3) -> Tensor:
   height, width = latent_dims[0] // 2, latent_dims[1] // 2
 
-  pos_enc = Tensor.zeros(height, width, pos_dim)
+  pos_enc = Tensor.zeros(height, width, pos_dim).contiguous()
 
   row_idxs = Tensor.arange(height)
   pos_enc[:, :, 1] = row_idxs.unsqueeze(1)
