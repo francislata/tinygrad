@@ -515,8 +515,13 @@ def eval_flux1():
     load_state_dict(model, state_dict)
     return model
 
-  def eval_step(model:Flux, sample:dict[str, Tensor]) -> Tensor:
-    pass
+  def eval_step(model:Flux, noise:Tensor, labels:Tensor, latent_dims:tuple[int, int], **kwargs) -> Tensor:
+    latent_noise_pred = model(**kwargs)
+
+    pred = unpack_latents(latent_noise_pred, latent_dims)
+    tgt = noise - labels
+    loss = (pred - tgt).square().mean(axis=(1, 2, 3))
+    return loss.sum()
 
   BS = getenv("BS", 4)
   BASEDIR = getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed")
@@ -524,22 +529,31 @@ def eval_flux1():
   model = load_model()
 
   total_num_samples = math.ceil(29696 / BS)
+  eval_samples, eval_loss = 0, Tensor(0.0)
+
   for sample in tqdm(batch_load_flux(BS, BASEDIR, cfg_prob=0.0, is_infinite=False), total=total_num_samples):
     labels = generate_labels(sample["mean"], sample["logvar"])
-    timestep, clip_enc, t5_enc = sample.pop("timestep"), sample["clip_encodings"], sample["t5_encodings"]
+    timesteps, clip_enc, t5_enc = sample.pop("timestep"), sample["clip_encodings"], sample["t5_encodings"]
 
     noise = Tensor.randn_like(labels)
-    timestep = timestep.view(-1, 1, 1, 1)
-    sigmas = timestep / 8.0
+    timestep_values = timesteps / 8.0
+    sigmas = timestep_values.view(-1, 1, 1, 1)
     latents = (1 - sigmas) * labels + sigmas * noise
 
     b, _, latent_h, latent_w = latents.shape
-    latent_pos_enc = create_pos_enc_for_latents(b, (latent_h, latent_w))
+    latent_pos_enc = create_pos_enc_for_latents(b, (latent_dims := (latent_h, latent_w)))
     text_pos_enc = Tensor.zeros(b, t5_enc.shape[1], 3)
 
     latents = pack_latents(latents)
 
-    # loss = eval_step(model, sample)
+    loss = eval_step(model, noise, labels, latent_dims, img=latents, img_ids=latent_pos_enc, txt=t5_enc, txt_ids=text_pos_enc, y=clip_enc, timesteps=timestep_values)
+    tqdm.write(f"loss: {loss.item():.3f}")
+
+    eval_samples += sample["mean"].shape[0]
+    eval_loss += loss
+
+  avg_loss = eval_loss.item() / eval_samples
+  tqdm.write(f"avg_loss: {avg_loss.item():.3f}")
 
 if __name__ == "__main__":
   # inference only
