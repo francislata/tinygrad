@@ -56,14 +56,13 @@ atexit.register(lambda: [Device[dn].finalize() for dn in Device._opened_devices]
 # **************** Profile ****************
 
 @dataclass(frozen=True)
-class ProfileDeviceEvent(ProfileEvent):
-  device:str; comp_tdiff:decimal.Decimal=decimal.Decimal(0); copy_tdiff:decimal.Decimal=decimal.Decimal(0); props:dict[str,Any]|None=None # noqa: E702
+class ProfileDeviceEvent(ProfileEvent): device:str; tdiff:decimal.Decimal=decimal.Decimal(0); props:dict[str,Any]|None=None # noqa: E702
 
 @dataclass(frozen=True)
 class ProfileProgramEvent(ProfileEvent): device:str; name:str; lib:bytes|None; base:int|None; tag:int|None=None # noqa: E702
 
 @dataclass(frozen=True)
-class ProfileGraphEntry: device:str; name:str; st_id:int; en_id:int; is_copy:bool # noqa: E702
+class ProfileGraphEntry: device:str; name:str; st_id:int; en_id:int # noqa: E702
 
 @dataclass(frozen=True)
 class ProfileGraphEvent(ProfileEvent): ents:list[ProfileGraphEntry]; deps:list[list[int]]; sigs:list[decimal.Decimal] # noqa: E702
@@ -147,8 +146,9 @@ class Buffer:
   def deallocate(self):
     assert hasattr(self, '_buf'), "buffer must be allocated to deallocate"
     if DEBUG is not None and DEBUG >= 7: print(f"buffer: deallocate {self.nbytes} bytes on {self.device}")
-    if self._base is None and (self.options is None or self.options.external_ptr is None):
-      if GlobalCounters is not None and not self.device.startswith("DISK"): GlobalCounters.mem_used -= self.nbytes
+    if self._base is None:
+      if GlobalCounters is not None and not self.device.startswith("DISK") and (self.options is None or self.options.external_ptr is None):
+        GlobalCounters.mem_used -= self.nbytes
       if PROFILE: Buffer.profile_events.append(ProfilePointEvent(self.device, "free", self.trace_num))
       self.allocator.free(self._buf, self.nbytes, self.options)
     elif self._base is not None: self._base.allocated_views -= 1
@@ -176,20 +176,16 @@ class Buffer:
   def as_dmaref(self) -> DMARef:
     assert hasattr(self.allocator, "_as_dmaref"), f"Device {self.device} doesn't support DMA"
     return self.allocator._as_dmaref(self._buf)
-  def as_buffer(self, allow_zero_copy=False, force_zero_copy=False) -> memoryview:
-    # zero copy with as_buffer (disabled by default due to use after free)
+  def as_memoryview(self, allow_zero_copy=False, force_zero_copy=False) -> memoryview:
+    # zero copy with as_memoryview (disabled by default due to use after free)
     if (force_zero_copy or allow_zero_copy) and hasattr(self.allocator, '_as_buffer') and (self.options is None or self.options.image is None):
       return self.allocator._as_buffer(self._buf)
     assert not force_zero_copy, "force zero copy was passed, but copy is required"
     return self.copyout(memoryview(bytearray(self.nbytes)))
-  def as_typed_buffer(self, shape=None, allow_zero_copy=False, force_zero_copy=False) -> memoryview:
-    assert self.dtype.base.fmt is not None, f"no fmt dtype for {self.dtype.base}"
-    assert self.dtype.base.fmt != "e" or sys.version_info >= (3, 12)
-    return self.as_buffer(allow_zero_copy, force_zero_copy).cast(self.dtype.base.fmt, shape if shape is not None else (self.size,))
   def numpy(self) -> 'np.ndarray': # type: ignore [name-defined] # noqa: F821
     import numpy as np
     assert _to_np_dtype(self.dtype.base) is not None, f"no np dtype for {self.dtype.base}"
-    return np.frombuffer(self.as_buffer(), dtype=_to_np_dtype(self.dtype.base))
+    return np.frombuffer(self.as_memoryview(), dtype=_to_np_dtype(self.dtype.base))
   def copyin(self, mv:memoryview):
     mv = flat_mv(mv)
     assert len(mv) == self.nbytes, f"size mismatch, {len(mv)=} != {self.dtype=} {self.size=}"
@@ -263,7 +259,7 @@ class LRUAllocator(Allocator, Generic[DeviceType]):
       for opaque in opaques: super().free(opaque, sz, options)
       opaques.clear()
   def free(self, opaque:Any, size:int, options:BufferSpec|None=None):
-    if LRU and (options is None or not options.nolru): self.cache[(size, options)].append(opaque)
+    if LRU and (options is None or (not options.nolru and options.external_ptr is None)): self.cache[(size, options)].append(opaque)
     else: super().free(opaque, size, options)
 
 # **************** for Compiled Devices ****************
@@ -410,9 +406,9 @@ def enumerate_devices_str() -> Generator[str, None, None]:
             if test != [2,4,6]: raise ValueError(f"got {test} instead of [2, 4, 6]")
             set_text = f'({cc_ctrl_var.key}={d._compiler_name(r, c)} to make default)' if cc_ctrl_var is not None else ''
             default_text = '(default)' if type(default_compiler) is type(d.compiler) else set_text
-            compilers_results.append(f"{colored('+', 'green')} {unwrap_class_type(c).__name__} {default_text}")
+            compilers_results.append(f"{colored('+', 'green')} {d._compiler_name(r, c)} {default_text}")
             any_works = True
-          except Exception as e: compilers_results.append(f"{colored('-', 'yellow')} {unwrap_class_type(c).__name__}: {e}")
+          except Exception as e: compilers_results.append(f"{colored('-', 'yellow')} {d._compiler_name(r, c)}: {e}")
       finally:
         # put the defaults back!
         d.comp_sets, d.comps_ctrl_var = default_comp_pairs, cc_ctrl_var

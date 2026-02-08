@@ -75,11 +75,11 @@ class BufferCopy(Runner):
       getattr(src.allocator.dev, 'fd', None) is not None and dest.allocator.supports_copy_from_disk
     if disk_supports_fast_copyout and hasattr(dest.allocator, 'copy_from_disk') and src.nbytes >= 4096:
       dest.allocator.copy_from_disk(dest._buf, src._buf, src.nbytes)
-    elif (src.device.startswith("DISK") or src.device.startswith("TINYFS")) and hasattr(dest.allocator, '_as_buffer'):
+    elif isinstance(src.device, str) and src.device.startswith(("DISK", "TINYFS")) and hasattr(dest.allocator, '_as_buffer'):
       # fast(ish) path, uses readinto in diskbuffers
       src.allocator._copyout(dest.allocator._as_buffer(dest._buf), src._buf)
     else:
-      dest.copyin(src.as_buffer(allow_zero_copy=True))  # may allocate a CPU buffer depending on allow_zero_copy
+      dest.copyin(src.as_memoryview(allow_zero_copy=True))  # may allocate a CPU buffer depending on allow_zero_copy
   def __call__(self, rawbufs:list[Buffer], var_vals:dict[str, int], wait=False):
     dest, src = rawbufs[0:2]
     assert dest.size == src.size and dest.dtype == src.dtype, f"buffer copy mismatch, {dest.size} != {src.size}, {dest.dtype} != {src.dtype}"
@@ -159,7 +159,7 @@ class ExecItem:
     var_vals = self.fixedvars if _var_vals is None else (_var_vals|self.fixedvars)
     # reorder bufs to match program globals if needed
     _bufs = [self.bufs[i] for i in self.prg.p.globals] if isinstance(self.prg, CompiledRunner) else self.bufs
-    bufs = cast(list[Buffer], [unwrap(x) for x in _bufs] if jit else [unwrap(x).ensure_allocated() for x in _bufs])
+    bufs = [unwrap(x) for x in _bufs] if jit else [unwrap(x).ensure_allocated() for x in _bufs]
     if PROFILE:
       payload = {"metadata":self.metadata, "var_vals":var_vals, "bufs":[b.trace_num for b in bufs], "name":self.prg.display_name}
       payload["outputs"], payload["inputs"] = (self.prg.p.outs, self.prg.p.ins) if isinstance(self.prg, CompiledRunner) else ([0], [1])
@@ -199,7 +199,7 @@ def run_schedule(schedule:list[ExecItem], var_vals:dict[str, int]|None=None, do_
       bufs = [b for b in ei.bufs if b is not None]
       nb: list[Buffer|None] = [Buffer("CPU", b.size, b.dtype) for b in bufs]
       for cpu_b, gpu_b in zip(nb, bufs):
-        if cpu_b is not None and gpu_b.is_allocated(): cpu_b.ensure_allocated().copyin(gpu_b.as_buffer())
+        if cpu_b is not None and gpu_b.is_allocated(): cpu_b.ensure_allocated().copyin(gpu_b.as_memoryview())
 
       # run on GPU
       ei.run(var_vals, do_update_stats=do_update_stats)

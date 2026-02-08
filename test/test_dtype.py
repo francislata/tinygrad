@@ -1,4 +1,4 @@
-import unittest, math
+import contextlib, unittest, math
 import numpy as np
 import torch
 from typing import Any, List
@@ -7,7 +7,7 @@ from tinygrad.helpers import getenv, DEBUG, CI, EMULATED_DTYPES
 from tinygrad.dtype import DType, DTYPES_DICT, least_upper_dtype, fp8_to_float, float_to_fp8, _to_np_dtype, _to_torch_dtype, truncate
 from tinygrad.renderer.ptx import PTXRenderer
 from tinygrad.renderer.nir import NIRRenderer
-from tinygrad import Device, Tensor, dtypes
+from tinygrad import Context, Device, Tensor, dtypes
 from hypothesis import given, settings, strategies as strat
 from test.helpers import rand_for_dtype
 from test.unit.test_dtype_spec import _assert_eq, core_dtypes, dtype_ints, dtype_floats, FP8E4M3_MAX, FP8E5M2_MAX
@@ -246,6 +246,17 @@ class TestBFloat16DTypeCast(unittest.TestCase):
 
 class TestHalfDType(TestDType): DTYPE = dtypes.half
 
+class TestEmulatedHalf(TestHalfDType):
+  @classmethod
+  def setUpClass(cls):
+    cls.stack = contextlib.ExitStack()
+    cls.stack.enter_context(Context(EMULATED_DTYPES="half"))
+    cls.DATA = rand_for_dtype(cls.DTYPE, 10)
+
+  @classmethod
+  def tearDownClass(cls): cls.stack.close()
+
+
 class TestFloatDType(TestDType):
   DTYPE = dtypes.float
 
@@ -336,24 +347,72 @@ class TestUint16DType(TestDType):
 class TestInt32DType(TestDType): DTYPE = dtypes.int32
 class TestUint32DType(TestDType): DTYPE = dtypes.uint32
 
-class TestInt64DType(TestDType):
-  DTYPE = dtypes.int64
+class TestInt64DType(TestDType): DTYPE = dtypes.int64
+
+@unittest.skipIf(isinstance(Device[Device.DEFAULT].renderer, PTXRenderer), "PTX does indexing math with longs")
+class TestEmulatedInt64DType(TestInt64DType):
   @classmethod
-  def setUpClass(cls): cls.DATA = rand_for_dtype(cls.DTYPE, 10)
+  def setUpClass(cls):
+    cls.stack = contextlib.ExitStack()
+    cls.stack.enter_context(Context(EMULATED_DTYPES="long"))
+    cls.DATA = rand_for_dtype(cls.DTYPE, 10)
+
+  @classmethod
+  def tearDownClass(cls): cls.stack.close()
 
 class TestUint64DType(TestDType):
-  @classmethod
-  def setUpClass(cls): cls.DATA = rand_for_dtype(cls.DTYPE, 10)
   DTYPE = dtypes.uint64
   def test_uint64_load(self):
     assert Tensor(2**64 - 1, dtype=dtypes.uint64).numpy() == 2**64 - 1
+
+@unittest.skipIf(isinstance(Device[Device.DEFAULT].renderer, PTXRenderer), "PTX does indexing math with longs")
+class TestEmulatedUInt64DType(TestUint64DType):
+  @classmethod
+  def setUpClass(cls):
+    cls.stack = contextlib.ExitStack()
+    cls.stack.enter_context(Context(EMULATED_DTYPES="long"))
+    cls.DATA = rand_for_dtype(cls.DTYPE, 10)
+
+  @classmethod
+  def tearDownClass(cls): cls.stack.close()
 
 class TestBoolDType(TestDType): DTYPE = dtypes.bool
 
 class TestBFloat16Type(TestDType): DTYPE = dtypes.bfloat16
 
+class TestEmulatedBFloat16Type(TestBFloat16Type):
+  @classmethod
+  def setUpClass(cls):
+    cls.stack = contextlib.ExitStack()
+    cls.stack.enter_context(Context(EMULATED_DTYPES="bfloat16"))
+    cls.DATA = rand_for_dtype(cls.DTYPE, 10)
+
+  @classmethod
+  def tearDownClass(cls): cls.stack.close()
+
 class TestFp8e4m3(TestDType): DTYPE = dtypes.fp8e4m3
+
+class TestEmulatedFp8e4m3(TestFp8e4m3):
+  @classmethod
+  def setUpClass(cls):
+    cls.stack = contextlib.ExitStack()
+    cls.stack.enter_context(Context(EMULATED_DTYPES="fp8e4m3"))
+    cls.DATA = rand_for_dtype(cls.DTYPE, 10)
+
+  @classmethod
+  def tearDownClass(cls): cls.stack.close()
+
 class TestFp8e5m2(TestDType): DTYPE = dtypes.fp8e5m2
+
+class TestEmulatedFp8e5m2(TestFp8e5m2):
+  @classmethod
+  def setUpClass(cls):
+    cls.stack = contextlib.ExitStack()
+    cls.stack.enter_context(Context(EMULATED_DTYPES="fp8e5m2"))
+    cls.DATA = rand_for_dtype(cls.DTYPE, 10)
+
+  @classmethod
+  def tearDownClass(cls): cls.stack.close()
 
 class TestPtrDType(unittest.TestCase):
   def test_vec_double(self):

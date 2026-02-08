@@ -1,7 +1,8 @@
 from typing import cast
-import functools, itertools, operator
-from tinygrad.helpers import all_same, all_int, prod, DEBUG, RING, ALL2ALL, getenv
+import functools, itertools
+from tinygrad.helpers import all_same, all_int, prod, DEBUG, RING, ALL2ALL, VIZ, getenv
 from tinygrad.uop.ops import Ops, UOp, sint, PatternMatcher, UPat, GroupOp, graph_rewrite_map, graph_rewrite
+from tinygrad.dtype import dtypes
 from tinygrad.device import Device
 
 # *** allreduce implementation ***
@@ -71,7 +72,8 @@ def handle_allreduce(buf:UOp, red:UOp) -> UOp|None:
   # allgather
   copied_chunks = []
   for i,rc in enumerate(reduced_chunks):
-    if use_all2all: copied_chunks.append(UOp(Ops.MSTACK, buf.dtype, tuple(rc.copy_to_device(buf.device[j]) for j in range(n_lbs))))
+    if isinstance(red.src[1].arg, str): copied_chunks.append(rc.copy_to_device(red.src[1].arg))
+    elif use_all2all: copied_chunks.append(UOp(Ops.MSTACK, buf.dtype, tuple(rc.copy_to_device(buf.device[j]) for j in range(n_lbs))))
     else:
       this_chunk: list[UOp|None] = [None] * n_lbs
       this_chunk[(i+n_lbs-1)%n_lbs] = rc
@@ -80,8 +82,7 @@ def handle_allreduce(buf:UOp, red:UOp) -> UOp|None:
       copied_chunks.append(UOp(Ops.MSTACK, buf.dtype, tuple(cast(list[UOp], this_chunk))))
 
   # reassemble
-  pads = [((s,numel-e),) for s,e in chunks]
-  return functools.reduce(operator.add, [c.pad(pad) for pad,c in zip(pads, copied_chunks)]).reshape(shape)
+  return UOp.sum(*[c.pad(((s,numel-e),)) for (s,e),c in zip(chunks, copied_chunks)]).reshape(shape)
 
 # ***** multi rewrite MSELECT/MSTACK *****
 
@@ -93,12 +94,7 @@ def mstack_early_shrink(ms:UOp, shrink:UOp):
     return s.shrink(tuple(new_arg))
   for i, x in enumerate(ms.src):
     if x.op is Ops.COPY:
-      # if src device doesn't have a renderer, we have to view after the copy
-      # TODO: a way to understand this
-      if x.src[0].device in {"DISK", "NPY"}:
-        ret.append(apply_shrink(x, i))
-      else:
-        ret.append(apply_shrink(x.src[0], i).copy_to_device(x.device))
+      ret.append(apply_shrink(x.src[0], i).copy_to_device(x.device))
     else:
       ret.append(apply_shrink(x, i).contiguous())
   return ms.replace(src=tuple(ret))
@@ -202,7 +198,7 @@ def assign_multi(dest:UOp, src:UOp):
   return dest.src[0].assign(src.src[0]).multi(src.axis)
 
 def passthrough_multi(root:UOp, multi:UOp):
-  return UOp(root.op, root.dtype, (multi.src[0],), root.arg).multi(multi.axis)
+  return UOp(root.op, root.dtype, (multi.src[0],)+tuple(x.src[0] if x.op is Ops.MULTI else x for x in root.src[1:]), root.arg).multi(multi.axis)
 
 # NOTE: this is the same pattern as Ops.UNROLL
 multi_pm = PatternMatcher([
@@ -218,17 +214,19 @@ multi_pm = PatternMatcher([
   (UPat(Ops.COPY, src=(UPat(Ops.MULTI, name="multi"), UPat(Ops.DEVICE, name="device"))), copy_multi),
   (UPat(Ops.ALLREDUCE, src=(UPat(Ops.MULTI, name="multi"), UPat(Ops.DEVICE, name="device")), name="red"),
     lambda multi,device,red: multi.src[0].allreduce(red.arg, device).multi(axis=multi.axis)),
+  (UPat(Ops.CALL, src=(UPat(Ops.MULTI, name="multi"), ), name="root", allow_any_len=True), passthrough_multi),
+  # we just remove the MULTI from CALLs with dtypes.void and assume they are handled by the user for custom kernels
+  (UPat(Ops.CALL, dtype=dtypes.void, name="root", custom_early_reject=set([Ops.MULTI])), lambda root:
+    UOp(root.op, root.dtype, tuple(x.src[0] if x.op is Ops.MULTI else x for x in root.src), root.arg)),
   (UPat((Ops.CAST, Ops.BITCAST, Ops.CONTIGUOUS, Ops.DETACH, Ops.CONTIGUOUS_BACKWARD),
         src=(UPat(Ops.MULTI, name="multi"), ), name="root"), passthrough_multi),
-  # multi supports custom kernels with CUSTOM_KERNEL + AFTER
-  (UPat(Ops.CUSTOM_KERNEL, src=UPat((Ops.MULTI, Ops.CONTIGUOUS)), name="ck"),
-    lambda ck: ck.replace(src=tuple(m.src[0] if m.op is Ops.MULTI else m for m in ck.src))),
-  (UPat(Ops.AFTER, src=(UPat(Ops.MULTI, name="multi"), UPat(Ops.CUSTOM_KERNEL)), name="a"),
-    lambda multi,a: a.replace(src=(multi.src[0],)+a.src[1:]).multi(multi.axis))
+  # after CALL
+  (UPat(Ops.AFTER, src=(UPat(Ops.MULTI, name="multi"), UPat(Ops.CALL)), name="a"),
+    lambda multi,a: a.replace(src=(multi.src[0],)+a.src[1:]).multi(multi.axis)),
 ])+replace_allreduce
 
 def get_multi_map(big_sink:UOp) -> dict[UOp, UOp]:
-  if getenv("VIZ"): graph_rewrite(big_sink, PatternMatcher([]), name="View Multi AST")
+  if VIZ: graph_rewrite(big_sink, PatternMatcher([]), name="View Multi AST")
   ret = graph_rewrite_map(big_sink, multi_pm, name="multi_pm")
-  if getenv("VIZ"): graph_rewrite(ret[big_sink], PatternMatcher([]), name="View Post Multi AST")
+  if VIZ: graph_rewrite(ret[big_sink], PatternMatcher([]), name="View Post Multi AST")
   return ret

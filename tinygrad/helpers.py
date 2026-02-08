@@ -86,7 +86,9 @@ def word_wrap(x, wrap=80):
   while len(ansistrip(x[:i])) < wrap and i < len(x): i += 1
   return x[:i] + "\n" + word_wrap(x[i:], wrap)
 def pad_bytes(b:bytes, align:int) -> bytes: return b + b'\x00' * ((align - (len(b) % align)) % align)
-def panic(e:Exception|None=None): raise e if e is not None else RuntimeError("PANIC!")
+
+# NOTE: you must create the exception inside the function where it's raised or you will get a GC cycle!
+def panic(e:type[Exception]|None=None, *arg): raise e(*arg) if e is not None else RuntimeError("PANIC!")
 
 @functools.cache
 def canonicalize_strides(shape:tuple[T, ...], strides:tuple[T, ...]) -> tuple[T, ...]:
@@ -185,7 +187,7 @@ CPU_COUNT = ContextVar("CPU_COUNT", max(1, len(os.sched_getaffinity(0)) if hasat
 # Compilers
 CPU_LLVM, CPU_LVP, AMD_LLVM = ContextVar("CPU_LLVM", 0), ContextVar("CPU_LVP", 0), ContextVar("AMD_LLVM", 0)
 NV_PTX, CUDA_PTX, NV_NAK, QCOM_IR3 = ContextVar("NV_PTX", 0), ContextVar("CUDA_PTX", 0), ContextVar("NV_NAK", 0), ContextVar("QCOM_IR3", 0)
-NULL_IR3, NULL_NAK = ContextVar("NULL_IR3", 0), ContextVar("NULL_NAK", 0)
+NULL_IR3, NULL_NAK, NULL_ALLOW_COPYOUT = ContextVar("NULL_IR3", 0), ContextVar("NULL_NAK", 0), ContextVar("NULL_ALLOW_COPYOUT", 0)
 AMD_CC, CPU_CC, NV_CC, CUDA_CC = ContextVar("AMD_CC", ""), ContextVar("CPU_CC", ""), ContextVar("NV_CC", ""), ContextVar("CUDA_CC", "")
 QCOM_CC = ContextVar("QCOM_CC", "")
 # VIZ implies PROFILE, but you can run PROFILE without VIZ
@@ -204,6 +206,10 @@ CCACHE = ContextVar("CCACHE", 1)
 ALLOW_TF32 = ContextVar("ALLOW_TF32", 0)
 # set to 0 to disable the scheduler cache
 SCACHE = ContextVar("SCACHE", 1)
+# allow use of atomics for embedding backward
+USE_ATOMICS = ContextVar("USE_ATOMICS", 0)
+# allow use of assembly for gemm
+ASM_GEMM = ContextVar("ASM_GEMM", 0)
 
 @dataclass(frozen=True)
 class Metadata:
@@ -283,8 +289,7 @@ class TracingKey:
 class ProfileEvent: pass
 
 @dataclass
-class ProfileRangeEvent(ProfileEvent):
-  device:str; name:str|TracingKey; st:decimal.Decimal; en:decimal.Decimal|None=None; is_copy:bool=False # noqa: E702
+class ProfileRangeEvent(ProfileEvent): device:str; name:str|TracingKey; st:decimal.Decimal; en:decimal.Decimal|None=None # noqa: E702
 
 @dataclass(frozen=True)
 class ProfilePointEvent(ProfileEvent):
@@ -292,8 +297,8 @@ class ProfilePointEvent(ProfileEvent):
 
 cpu_events:list[ProfileEvent] = []
 @contextlib.contextmanager
-def cpu_profile(name:str|TracingKey, device="TINY", is_copy=False, display=True) -> Generator[ProfileRangeEvent, None, None]:
-  res = ProfileRangeEvent(device, name, perf_counter_us(), is_copy=is_copy)
+def cpu_profile(name:str|TracingKey, device="TINY", display=True) -> Generator[ProfileRangeEvent, None, None]:
+  res = ProfileRangeEvent(device, name, perf_counter_us())
   try: yield res
   finally:
     res.en = perf_counter_us()

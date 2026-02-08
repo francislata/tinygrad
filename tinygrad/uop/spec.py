@@ -1,6 +1,6 @@
 import math
 from typing import cast, Any
-from tinygrad.uop.ops import PatternMatcher, UPat, GroupOp, Ops, UOp, print_uops, AxisType, KernelInfo, pyrender, Kernel, CustomKernel
+from tinygrad.uop.ops import PatternMatcher, UPat, GroupOp, Ops, UOp, print_uops, AxisType, KernelInfo, pyrender
 from tinygrad.dtype import DType, ImageDType, dtypes, PtrDType, AddrSpace, Invalid, ConstFloat
 from tinygrad.helpers import DEBUG, Context, prod, SPEC, Metadata, panic, CHECK_OOB
 
@@ -73,9 +73,6 @@ movement_ops = PatternMatcher([
 
   # AFTER on Movement Op
   (UPat(Ops.AFTER, src=(UPat(GroupOp.Movement.union({Ops.MULTI, Ops.CONTIGUOUS})),), allow_any_len=True), lambda: True),
-
-  # custom kernels allowed here
-  (UPat(Ops.CUSTOM_KERNEL), lambda: True),
 ])
 
 _tensor_spec = PatternMatcher([
@@ -84,14 +81,11 @@ _tensor_spec = PatternMatcher([
   (UPat(Ops.LUNIQUE, dtypes.void, ()), lambda: True),
   (UPat(Ops.DEVICE, dtypes.void, (), name="d"), lambda d:
    isinstance(d.arg, str) or (isinstance(d.arg, tuple) and all(isinstance(s, str) for s in d.arg))),
-  (UPat(Ops.BUFFER, src=(UPat((Ops.LUNIQUE, Ops.UNIQUE)), UPat(Ops.DEVICE)), allow_any_len=True, name="buf"),
+  (UPat(Ops.BUFFER, src=(UPat((Ops.LUNIQUE, Ops.UNIQUE)), UPat(Ops.DEVICE)), name="buf"),
    lambda buf: isinstance(buf.arg, int) and isinstance(buf.dtype, (DType, ImageDType))),
-  (UPat(Ops.BUFFER_VIEW, src=(UPat(Ops.BUFFER),), name="buf_view"),
-   lambda buf_view: isinstance(buf_view.arg, tuple) and len(buf_view.arg) == 2 and all(isinstance(arg, (int, UOp)) for arg in buf_view.arg)),
-  (UPat(Ops.BUFFER_VIEW, src=(UPat(Ops.MSTACK, src=UPat(Ops.BUFFER)),)), lambda: True),
 
   # KERNEL can attach to an AFTER to describe the compute required to realize a BUFFER
-  (UPat(Ops.KERNEL, src=UPat((Ops.BUFFER, Ops.BUFFER_VIEW, Ops.AFTER, Ops.MSELECT, Ops.MSTACK, Ops.BIND, Ops.CONTIGUOUS))), lambda: True),
+  (UPat(Ops.CALL, src=UPat((Ops.BUFFER, Ops.AFTER, Ops.MSELECT, Ops.MSTACK, Ops.BIND))), lambda: True),
 
   # ASSIGN has a target and a value. It can also optionally depend on other assigns
   (UPat(Ops.ASSIGN, name="x"), lambda x: len(x.src) >= 2 and all(s.op is Ops.ASSIGN for s in x.src[2:])),
@@ -109,7 +103,7 @@ _tensor_spec = PatternMatcher([
 
   # device or unique
   (UPat(Ops.CONST, src=(UPat(Ops.DEVICE),)), lambda: True),
-  (UPat(Ops.CONST, src=(UPat(Ops.DEVICE), UPat((Ops.LUNIQUE, Ops.UNIQUE)))), lambda: True),
+  (UPat(Ops.CONST, src=(UPat((Ops.LUNIQUE, Ops.UNIQUE)), UPat(Ops.DEVICE))), lambda: True),
 
   # DETACH and CONTIGUOUS change how we interpret the source UOp
   # CONTIGUOUS ensures the source UOp realizes
@@ -137,19 +131,30 @@ _tensor_spec = PatternMatcher([
 
   # Tensor range bind / store
   (UPat(Ops.BIND, (dtypes.int,dtypes.index,), (UPat(Ops.DEFINE_VAR), UPat(Ops.RANGE)), arg=None), lambda: True),
-  (UPat(Ops.STORE, src=(UPat(), UPat())), lambda: True)
-])+movement_ops+shared_spec
+  (UPat(Ops.STORE, src=(UPat(), UPat())), lambda: True),
 
-tensor_spec = PatternMatcher([
-  # no tags allowed in tensor graph
-  (UPat(GroupOp.All, name="x"), lambda x: None if x.tag is None else False),
-])+_tensor_spec
+  # allow CALL/PARAM
+  (UPat(Ops.CALL, src=(UPat(name="f"),), name="c", allow_any_len=True), lambda c,f: c.dtype == f.dtype),
+  (UPat(Ops.PARAM), lambda: True),
+
+  # ** for custom kernels **
+
+  # codegen: PROGRAM with progressive sources through the pipeline (SINK, DEVICE, LINEAR?, SOURCE?, BINARY?)
+  (UPat(Ops.PROGRAM, dtypes.void, src=(UPat(Ops.SINK), UPat(Ops.DEVICE))), lambda: True),
+  (UPat(Ops.PROGRAM, dtypes.void, src=(UPat(Ops.SINK), UPat(Ops.DEVICE), UPat(Ops.LINEAR))), lambda: True),
+  (UPat(Ops.PROGRAM, dtypes.void, src=(UPat(Ops.SINK), UPat(Ops.DEVICE), UPat(Ops.LINEAR), UPat(Ops.SOURCE))), lambda: True),
+  (UPat(Ops.PROGRAM, dtypes.void, src=(UPat(Ops.SINK), UPat(Ops.DEVICE), UPat(Ops.LINEAR), UPat(Ops.SOURCE), UPat(Ops.BINARY))), lambda: True),
+  # codegen: standalone LINEAR/SOURCE/BINARY
+  (UPat(Ops.LINEAR, dtypes.void), lambda: True),
+  (UPat(Ops.SOURCE, dtypes.void, src=()), lambda: True),
+  (UPat(Ops.BINARY, dtypes.void, src=()), lambda: True),
+])+movement_ops+shared_spec
 
 # ***** UOp spec in codegen shared between kernel and program *****
 
 shared_codegen_spec = PatternMatcher([
   # DEFINEs
-  (UPat(Ops.DEFINE_GLOBAL, name="x"), lambda x: isinstance(x.dtype, (PtrDType, ImageDType)) and x.dtype.addrspace == AddrSpace.GLOBAL),
+  (UPat(Ops.PARAM, name="x"), lambda x: isinstance(x.dtype, (PtrDType, ImageDType)) and x.dtype.addrspace == AddrSpace.GLOBAL),
   (UPat(Ops.DEFINE_LOCAL, name="x"), lambda x: isinstance(x.dtype, PtrDType) and x.dtype.addrspace == AddrSpace.LOCAL),
   (UPat(Ops.DEFINE_REG, src=(), name="x"), lambda x: isinstance(x.arg, int)),
 
@@ -203,6 +208,11 @@ kernel_spec = PatternMatcher([
   (UPat(Ops.REDUCE, src=(UPat(),), allow_any_len=True, name="x"), lambda x: all(y.dtype in (dtypes.index, dtypes.int) for y in x.src[1:])),
 ])+movement_ops+shared_codegen_spec+shared_spec
 
+tensor_spec = PatternMatcher([
+  # no tags allowed in tensor graph
+  (UPat(GroupOp.All, name="x"), lambda x: None if x.tag is None else False),
+])+_tensor_spec+kernel_spec
+
 # ***** UOp spec in linearized programs *****
 
 program_spec = PatternMatcher([
@@ -234,8 +244,6 @@ full_spec = PatternMatcher([
 
   # rangeify: buffer view with index or load is okay
   (UPat(Ops.BUFFER_VIEW, src=(UPat((Ops.INDEX, Ops.LOAD)),)), lambda: True),
-  # assign on index. the third op is the shape
-  (UPat(Ops.ASSIGN, src=(UPat(), UPat(), UPat())), lambda: True),
 
   # expander: unroll/contract/gep/ptrcat/cat
   (UPat((Ops.UNROLL, Ops.CONTRACT), src=(UPat(),)), lambda: True),
@@ -249,7 +257,7 @@ full_spec = PatternMatcher([
   (UPat(Ops.INDEX, src=(UPat((Ops.VECTORIZE, Ops.CAST)), UPat())), lambda: True),
 
   # linearizer: outputs + intermediate KERNELs
-  (UPat(Ops.KERNEL, dtype=dtypes.void), lambda: True),
+  (UPat(Ops.CALL, dtype=dtypes.void), lambda: True),
 
   # Invalid must have type Index
   (UPat(Ops.CONST, arg=Invalid, name="x"), lambda x: x.dtype.scalar() == dtypes.index),
@@ -264,16 +272,6 @@ full_spec = PatternMatcher([
 
   # in progress MSTACK may lose device
   (UPat((Ops.MSELECT, Ops.MSTACK), name="x"), lambda x: True),
-
-  # codegen: PROGRAM with progressive sources through the pipeline (SINK, DEVICE, LINEAR?, SOURCE?, BINARY?)
-  (UPat(Ops.PROGRAM, dtypes.void, src=(UPat(Ops.SINK), UPat(Ops.DEVICE))), lambda: True),
-  (UPat(Ops.PROGRAM, dtypes.void, src=(UPat(Ops.SINK), UPat(Ops.DEVICE), UPat(Ops.LINEAR))), lambda: True),
-  (UPat(Ops.PROGRAM, dtypes.void, src=(UPat(Ops.SINK), UPat(Ops.DEVICE), UPat(Ops.LINEAR), UPat(Ops.SOURCE))), lambda: True),
-  (UPat(Ops.PROGRAM, dtypes.void, src=(UPat(Ops.SINK), UPat(Ops.DEVICE), UPat(Ops.LINEAR), UPat(Ops.SOURCE), UPat(Ops.BINARY))), lambda: True),
-  # codegen: standalone LINEAR/SOURCE/BINARY
-  (UPat(Ops.LINEAR, dtypes.void), lambda: True),
-  (UPat(Ops.SOURCE, dtypes.void, src=()), lambda: True),
-  (UPat(Ops.BINARY, dtypes.void, src=()), lambda: True),
 
   # temp VECTORIZE/INDEX during rewrite have the wrong dtype
   (UPat(Ops.VECTORIZE), lambda: True),
@@ -302,8 +300,8 @@ def type_verify(ast:UOp|list[UOp], check_spec:PatternMatcher):
 # late imports to avoid circular import
 from tinygrad.codegen.opt import Opt, OptOps
 from tinygrad.schedule.rangeify import BufferizeOpts
-glbls:dict[str, Any] = {"inf": math.inf, "nan": math.nan, "KernelInfo": KernelInfo, "Kernel": Kernel, "Metadata": Metadata,
-                        "UOp": UOp, "dtypes": dtypes, "Ops": Ops, "AxisType": AxisType, "Invalid": Invalid, "CustomKernel": CustomKernel,
+glbls:dict[str, Any] = {"inf": math.inf, "nan": math.nan, "KernelInfo": KernelInfo, "Metadata": Metadata,
+                        "UOp": UOp, "dtypes": dtypes, "Ops": Ops, "AxisType": AxisType, "Invalid": Invalid,
                         "Opt": Opt, "OptOps": OptOps, "BufferizeOpts": BufferizeOpts, "AddrSpace": AddrSpace, "panic": panic,
                         "ConstFloat": ConstFloat}
 def eval_pyrender(code:str) -> UOp:
@@ -312,7 +310,8 @@ def eval_pyrender(code:str) -> UOp:
   return lcls['ast']
 
 def test_pyrender(test_ast:UOp, assert_parents=True):
-  code = pyrender(test_ast)
+  try: code = pyrender(test_ast)
+  except NotImplementedError: return None  # this is okay, not all ops can be pyrendered
   ast:UOp = eval_pyrender(code)
   if ast is not test_ast:
     if assert_parents:

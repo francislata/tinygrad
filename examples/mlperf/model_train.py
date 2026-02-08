@@ -3,7 +3,7 @@ from pathlib import Path
 import multiprocessing
 
 from tinygrad import Device, GlobalCounters, Tensor, TinyJit, dtypes
-from tinygrad.helpers import getenv, BEAM, WINO, round_up, diskcache_clear, Profiling
+from tinygrad.helpers import getenv, BEAM, WINO, round_up, diskcache_clear, Profiling, profile_marker
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, safe_load, safe_save
 from tinygrad.nn.optim import LAMB, LARS, SGD, OptimizerGroup, Adam, AdamW
 
@@ -1321,6 +1321,8 @@ def train_llama3():
   opt_base_learning_rate = LR
   opt_end_learning_rate = END_LR
 
+  Tensor.manual_seed(SEED)  # seed for weight initialization
+
   # ** init wandb **
   WANDB = getenv("WANDB")
   if WANDB:
@@ -1411,17 +1413,17 @@ def train_llama3():
     # https://docs.pytorch.org/docs/stable/generated/torch.nn.utils.clip_grad_norm_.html
     if not getenv("DISABLE_GRAD_CLIP_NORM"):
       total_norm = Tensor(0.0, dtype=dtypes.float32, device=optim.params[0].device)
-      for p in optim.params:
-        total_norm += p.grad.float().square().sum()
-      total_norm = total_norm.sqrt().contiguous()
-      for p in optim.params:
-        p.grad.assign((p.grad * (opt_gradient_clip_norm / (total_norm + 1e-6)).clamp(max_=1.0)).cast(p.dtype))
+      for g in grads:
+        total_norm += g.float().square().sum()
+      total_norm = total_norm.sqrt().contiguous().realize()
+      for g in grads:
+        g.assign((g * (opt_gradient_clip_norm / (total_norm + 1e-6)).clamp(max_=1.0)).cast(g.dtype)).realize()
 
     optim.step()
     scheduler.step()
 
-    for p in optim.params:
-      p.grad.assign(p.grad.zeros_like().contiguous())
+    for g in grads:
+      g.assign(g.zeros_like().contiguous()).realize()
 
     lr = optim.lr
     Tensor.realize(lr, *grads)
@@ -1430,7 +1432,7 @@ def train_llama3():
 
   @TinyJit
   @Tensor.train(False)
-  def eval_step(model, tokens:Tensor):
+  def eval_step(tokens:Tensor):
     if (DP := getenv("DP", 1)) > 1:
       device = tuple(f"{Device.DEFAULT}:{i}" for i in range(DP))
       tokens = tokens.shard(device, 0)
@@ -1472,11 +1474,11 @@ def train_llama3():
   while i < MAX_STEPS:
     GlobalCounters.reset()
     if getenv("TRAIN", 1):
+      profile_marker(f"train @ {i}")
       st = time.perf_counter()
 
       stopped = False
-      minibatches = grad_acc if i >= 3 else 1
-      for _ in range(minibatches):
+      for _ in range(grad_acc):
         ist = time.perf_counter()
         try: tokens = next(train_iter)
         except StopIteration:
@@ -1498,7 +1500,7 @@ def train_llama3():
       gbs_time = gt - st
       optim_time = ot - gt
       data_time = dt - ist
-      dev_time = step_time - data_time * minibatches
+      dev_time = step_time - data_time * grad_acc
       if BENCHMARK: step_times.append(step_time)
 
       i += 1
@@ -1543,7 +1545,9 @@ def train_llama3():
               f"epoch global_mem: {GlobalCounters.global_mem:_}")
 
     if (sequences_seen % EVAL_FREQ == 0 and (i != 1 or EVAL_FREQ == 1)) or (BENCHMARK and i == BENCHMARK):
+      if EVAL_BS == 0: return
       tqdm.write(f"evaluating after {sequences_seen} sequences")
+      profile_marker(f"eval @ {i}")
 
       # run eval
       eval_losses = []
@@ -1551,7 +1555,8 @@ def train_llama3():
       tqdm.write(f"evaluating {5760//EVAL_BS} batches of {EVAL_BS} sequences")
 
       for j,tokens in tqdm(enumerate(eval_iter), total=EVAL_SAMPLES//EVAL_BS):
-        eval_losses += eval_step(model, tokens).tolist()
+        eval_losses += eval_step(tokens).tolist()
+
         if BENCHMARK and (j+1) == min(BENCHMARK, EVAL_SAMPLES//EVAL_BS):
           return
 
@@ -1640,7 +1645,7 @@ def train_stable_diffusion():
     loss, out_lr = loss.detach().to("CPU"), optimizer.lr.to("CPU")
     Tensor.realize(loss, out_lr)
     return loss, out_lr
-    
+
   # checkpointing takes ~9 minutes without this, and ~1 minute with this
   @TinyJit
   def ckpt_to_cpu():
@@ -1679,7 +1684,7 @@ def train_stable_diffusion():
     if i == 3:
       for _ in range(3): ckpt_to_cpu() # do this at the beginning of run to prevent OOM surprises when checkpointing
       print("BEAM COMPLETE", flush=True) # allows wrapper script to detect BEAM search completion and retry if it failed
-      
+
     total_train_time = time.perf_counter() - train_start_time
     if WANDB:
       wandb.log({"train/loss": loss_item, "train/lr": lr_item, "train/loop_time_prev": loop_time, "train/dl_time": dl_time, "train/step": i,
