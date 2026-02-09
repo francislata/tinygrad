@@ -508,11 +508,14 @@ def eval_flux1():
   )
   from extra.models.flux1 import Flux
 
-  def load_model():
+  def load_model(devices):
     model_weights = fetch("https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors")
-    model = Flux(False)
     state_dict = {k.replace("scale", "weight"): v for k, v in safe_load(model_weights).items()}
+
+    model = Flux(False)
+    for x in get_parameters(model): x.to_(devices)
     load_state_dict(model, state_dict)
+
     return model
 
   def eval_step(model:Flux, noise:Tensor, labels:Tensor, latent_dims:tuple[int, int], **kwargs) -> Tensor:
@@ -526,14 +529,17 @@ def eval_flux1():
   BS = getenv("BS", 4)
   BASEDIR = getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed")
 
-  model = load_model()
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 6))]
+  for x in GPUS: Device[x]
+
+  model = load_model(GPUS)
 
   total_num_samples = math.ceil(29696 / BS)
   eval_samples, eval_loss = 0, Tensor(0.0)
 
   for sample in tqdm(batch_load_flux(BS, BASEDIR, cfg_prob=0.0, is_infinite=False), total=total_num_samples):
-    labels = generate_labels(sample["mean"], sample["logvar"])
-    timesteps, clip_enc, t5_enc = sample.pop("timestep"), sample["clip_encodings"], sample["t5_encodings"]
+    labels = generate_labels(sample["mean"].shard(GPUS, 0), sample["logvar"].shard(GPUS, 0))
+    timesteps, clip_enc, t5_enc = sample.pop("timestep").shard(GPUS, 0), sample["clip_encodings"].shard(GPUS, 0), sample["t5_encodings"].shard(GPUS, 0)
 
     noise = Tensor.randn_like(labels)
     timestep_values = timesteps / 8.0
@@ -541,16 +547,17 @@ def eval_flux1():
     latents = (1 - sigmas) * labels + sigmas * noise
 
     b, _, latent_h, latent_w = latents.shape
-    latent_pos_enc = create_pos_enc_for_latents(b, (latent_dims := (latent_h, latent_w)))
-    text_pos_enc = Tensor.zeros(b, t5_enc.shape[1], 3)
+    latent_pos_enc = create_pos_enc_for_latents(b, (latent_dims := (latent_h, latent_w)), GPUS)
+    text_pos_enc = Tensor.zeros(b, t5_enc.shape[1], 3, device=GPUS)
 
     latents = pack_latents(latents)
 
     loss = eval_step(model, noise, labels, latent_dims, img=latents, img_ids=latent_pos_enc, txt=t5_enc, txt_ids=text_pos_enc, y=clip_enc, timesteps=timestep_values)
-    tqdm.write(f"loss: {loss.item():.3f}")
 
     eval_samples += sample["mean"].shape[0]
     eval_loss += loss
+
+    tqdm.write(f"loss: {loss.item():.3f}")
 
   avg_loss = eval_loss.item() / eval_samples
   tqdm.write(f"avg_loss: {avg_loss.item():.3f}")

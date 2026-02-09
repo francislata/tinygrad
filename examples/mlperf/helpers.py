@@ -374,15 +374,15 @@ def generate_labels(mean:Tensor, logvar:Tensor, ae_shift_factor:float=0.1159, ae
   z_sampled = mean + std * eps
   return (z_sampled - ae_shift_factor) * ae_scale_factor
 
-def create_pos_enc_for_latents(batch_size:int, latent_dims:tuple[int, int], pos_dim:int=3) -> Tensor:
+def create_pos_enc_for_latents(batch_size:int, latent_dims:tuple[int, int], devices, pos_dim:int=3) -> Tensor:
   height, width = latent_dims[0] // 2, latent_dims[1] // 2
 
-  pos_enc = Tensor.zeros(height, width, pos_dim).contiguous()
+  pos_enc = Tensor.zeros(height, width, pos_dim, device=devices).contiguous()
 
-  row_idxs = Tensor.arange(height)
+  row_idxs = Tensor.arange(height, device=devices)
   pos_enc[:, :, 1] = row_idxs.unsqueeze(1)
 
-  col_idxs = Tensor.arange(width)
+  col_idxs = Tensor.arange(width, device=devices)
   pos_enc[:, :, 2] = col_idxs.unsqueeze(0)
 
   return pos_enc.view(1, height * width, pos_dim).repeat(batch_size, 1, 1)
