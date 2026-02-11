@@ -535,7 +535,7 @@ def eval_flux1():
   model = load_model(GPUS)
 
   total_num_samples = math.ceil(29696 / BS)
-  eval_samples, eval_loss = 0, Tensor(0.0)
+  eval_samples, eval_loss = Tensor(0, device=GPUS), Tensor(0.0, device=GPUS)
 
   for sample in tqdm(batch_load_flux(BS, BASEDIR, cfg_prob=0.0, is_infinite=False), total=total_num_samples):
     labels = generate_labels(sample["mean"].shard(GPUS, 0), sample["logvar"].shard(GPUS, 0))
@@ -559,8 +559,8 @@ def eval_flux1():
 
     tqdm.write(f"loss: {loss.item():.3f}")
 
-  avg_loss = eval_loss.item() / eval_samples
-  tqdm.write(f"avg_loss: {avg_loss.item():.3f}")
+  avg_loss = eval_loss / eval_samples
+  print(f"avg_loss: {avg_loss.item():.3f}")
 
 if __name__ == "__main__":
   # inference only
