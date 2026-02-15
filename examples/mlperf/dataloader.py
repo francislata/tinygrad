@@ -905,14 +905,14 @@ if __name__ == "__main__":
 
   def load_flux(val):
     BASEDIR = getenv("BASEDIR", "/raid/datasets/flux/coco_preprocessed")
-    EMPTYENC_DIR = getenv("EMPTYENC_DIR", "")
+    EMPTYENCDIR = getenv("EMPTYENCDIR", "/raid/datasets/flux/empty_encodings")
 
     bs = 4
     seed = 1234
     total_num_samples = math.ceil((29696 if val else 1099776) / bs)
     cfg_prob = 0.0 if val else 0.1
 
-    for _ in tqdm(batch_load_flux(bs, BASEDIR, EMPTYENC_DIR, seed=seed, cfg_prob=cfg_prob, is_infinite=False), total=total_num_samples):
+    for _ in tqdm(batch_load_flux(bs, BASEDIR, EMPTYENCDIR, seed=seed, cfg_prob=cfg_prob, is_infinite=False), total=total_num_samples):
       pass
 
 

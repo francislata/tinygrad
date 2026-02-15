@@ -1727,8 +1727,9 @@ def train_flux():
   NUM_STEPS = config["NUM_STEPS"] = getenv("NUM_STEPS", 30000)
   SEQ_LEN = config["seq_len"] = getenv("SEQ_LEN", 256)
   BS = config["BS"] = getenv("BS", 16)
+  BASEDIR = getenv("BASEDIR", "/raid/datasets/flux/cc12m_preprocessed")
+  EMPTYENCDIR = getenv("EMPTYENCDIR", "/raid/datasets/flux/empty_encodings")
 
-  base_dir = Path(getenv("BASEDIR", "/raid/datasets/flux/cc12m_preprocessed"))
   num_samples = 1099776
   lr = 1e-4
   lr_eps = 1e-8
@@ -1736,16 +1737,12 @@ def train_flux():
   lr_decay_ratio = 0.0
 
   def get_train_iter() -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
-    return batch_load_flux(base_dir, BS, seed=SEED)
-
-  def preprocess_labels(mean:Tensor, logvar:Tensor, ae_shift:float=0.1159, ae_scale:float=0.3611) -> Tensor:
-    std = Tensor.exp(0.5 * logvar)
-    eps = Tensor.randn_like(mean)
-    z_sampled = mean + std * eps
-    return (z_sampled - ae_shift) * ae_scale
+    return batch_load_flux(BS, BASEDIR, empty_enc_dir=EMPTYENCDIR, seed=SEED)
 
   def train_step(model:Flux, t5_enc:Tensor, clip_enc:Tensor, drop_enc:Tensor, mean:Tensor, logvar:Tensor) -> Tensor:
-    labels = preprocess_labels(mean, logvar)
+    pass
+
+  Tensor.manual_seed(SEED)
 
   # wandb
   wandb = getenv("WANDB")
@@ -1770,12 +1767,15 @@ def train_flux():
   }
   model = Flux(**model_params)
   model.init_weights()
-  # TODO: shard model weights
+
+  if len(GPUS) > 1:
+    for x in get_parameters(model):
+      x.to_(GPUS)
 
   train_iter = get_train_iter()
 
   # training loop
-  for t5_enc, clip_enc, drop_enc, mean, logvar in tqdm(train_iter, total=num_samples//BS):
+  for sample in tqdm(train_iter, total=num_samples//BS):
     pass
 
 if __name__ == "__main__":
