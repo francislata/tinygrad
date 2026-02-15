@@ -518,6 +518,7 @@ def eval_flux():
 
     return model
 
+  @TinyJit
   def eval_step(model:Flux, noise:Tensor, labels:Tensor, latent_dims:tuple[int, int], **kwargs) -> Tensor:
     latent_noise_pred = model(**kwargs)
 
@@ -548,7 +549,7 @@ def eval_flux():
 
     b, _, latent_h, latent_w = latents.shape
     latent_pos_enc = create_pos_enc_for_latents(b, (latent_dims := (latent_h, latent_w)), GPUS)
-    text_pos_enc = Tensor.zeros(b, t5_enc.shape[1], 3, device=GPUS)
+    text_pos_enc = Tensor.zeros(b, t5_enc.shape[1], 3, device=GPUS).contiguous().realize()
 
     latents = pack_latents(latents)
 
