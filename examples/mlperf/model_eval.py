@@ -497,7 +497,7 @@ def eval_stable_diffusion():
   # for testing
   return clip_score, fid_score, ckpt_iteration
 
-def eval_flux1():
+def eval_flux():
   from tinygrad.helpers import tqdm, fetch
   from examples.mlperf.dataloader import batch_load_flux
   from examples.mlperf.helpers import (
@@ -506,7 +506,7 @@ def eval_flux1():
     pack_latents,
     unpack_latents
   )
-  from extra.models.flux1 import Flux
+  from extra.models.flux import Flux
 
   def load_model(devices):
     model_weights = fetch("https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors")
@@ -527,7 +527,7 @@ def eval_flux1():
     return loss.sum()
 
   BS = getenv("BS", 4)
-  BASEDIR = getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed")
+  BASEDIR = getenv("BASEDIR", "/raid/datasets/flux/coco_preprocessed")
 
   GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 6))]
   for x in GPUS: Device[x]

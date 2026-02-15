@@ -1716,9 +1716,9 @@ def train_stable_diffusion():
   """)
     t6 = time.perf_counter()
 
-def train_flux1():
-  from examples.mlperf.dataloader import batch_load_flux1
-  from extra.models.flux1 import Flux
+def train_flux():
+  from examples.mlperf.dataloader import batch_load_flux
+  from extra.models.flux import Flux
 
   config = {}
 
@@ -1728,7 +1728,7 @@ def train_flux1():
   SEQ_LEN = config["seq_len"] = getenv("SEQ_LEN", 256)
   BS = config["BS"] = getenv("BS", 16)
 
-  base_dir = Path(getenv("BASEDIR", "/raid/datasets/flux1/cc12m_preprocessed"))
+  base_dir = Path(getenv("BASEDIR", "/raid/datasets/flux/cc12m_preprocessed"))
   num_samples = 1099776
   lr = 1e-4
   lr_eps = 1e-8
@@ -1736,7 +1736,7 @@ def train_flux1():
   lr_decay_ratio = 0.0
 
   def get_train_iter() -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
-    return batch_load_flux1(base_dir, BS, seed=SEED)
+    return batch_load_flux(base_dir, BS, seed=SEED)
 
   def preprocess_labels(mean:Tensor, logvar:Tensor, ae_shift:float=0.1159, ae_scale:float=0.3611) -> Tensor:
     std = Tensor.exp(0.5 * logvar)

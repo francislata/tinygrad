@@ -903,8 +903,8 @@ if __name__ == "__main__":
     print(f"max seq length: {max_}")
     print(f"min seq length: {min_}")
 
-  def load_flux1(val):
-    BASEDIR = getenv("BASEDIR", "/raid/datasets/flux1/coco_preprocessed")
+  def load_flux(val):
+    BASEDIR = getenv("BASEDIR", "/raid/datasets/flux/coco_preprocessed")
     EMPTYENC_DIR = getenv("EMPTYENC_DIR", "")
 
     bs = 4
