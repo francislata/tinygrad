@@ -1,11 +1,11 @@
 from typing import Any, cast
 import functools, itertools
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from tinygrad.dtype import dtypes, ImageDType, DType, AddrSpace, Invalid, PtrDType
 from tinygrad.uop.ops import UOp, Ops, UPat, PatternMatcher, GroupOp, identity_element
 from tinygrad.uop.symbolic import uop_given_valid, parse_valid, invalid_gate
-from tinygrad.helpers import getenv, flatten, AMX, prod, ceildiv, IMAGE
+from tinygrad.helpers import getenv, flatten, AMX, prod, IMAGE
 from tinygrad.renderer import Renderer
 
 # ***** image load valid simplification *****
@@ -187,9 +187,9 @@ def _do_image_fixup(dt:ImageDType, idx:UOp) -> tuple[UOp, UOp, int, int]:
   buf = idx.src[0]
   x, valid = idx.src[1].get_idx(), idx.src[1].get_valid()
   h, w = dt.shape[0], dt.shape[1]
-  if IMAGE == 1 and valid is not None and (tp:=dt.size // 4) // 64:
-    h, w = max(([(1, tp)] * (tp < 16384)) + [(tp//64//k, 64*k) for k in range(ceildiv(tp//64, 16384), min(tp//64, 256)+1) if (tp//64) % k == 0],
-               key=lambda hw: len(_drop_valid_stmts(valid, UOp.vectorize((x//4)%hw[1], x//(4*hw[1])), *hw)))
+  if IMAGE == 1 and valid is not None:
+    h, w = max(ImageDType.valid_dims(dt), key=lambda hw:
+               (len(_drop_valid_stmts(valid, idx:=uop_given_valid(valid, UOp.vectorize((x//4)%hw[1], x//(4*hw[1]))), *hw)), -len(idx.backward_slice)))
     buf = buf.replace(dtype=(dtypes.imageh if dt.itemsize == 2 else dtypes.imagef)((h, w, 4), w * 4 * dt.itemsize))
   oidx = UOp(Ops.VECTORIZE, dtypes.index.vec(2), ((x // 4) % w, (x // (4*w))))
   return x, idx.replace(src=(buf, oidx.valid(valid))), w, h
@@ -308,8 +308,6 @@ pm_render = PatternMatcher([
 @dataclass
 class ReduceContext:
   acc_num: int = 0
-  # track ENDs by range for merging parallel reduces
-  range_to_ends: dict[tuple[UOp, ...], list[UOp]] = field(default_factory=dict)
 
 def horizontal_reduce(inp:UOp, out_dtype:DType) -> list[UOp]:
   # if this has a horizontal reduction component, do that first
@@ -335,13 +333,15 @@ def reduce_to_acc(ctx:ReduceContext, red:UOp):
     ctx.acc_num += 1
   ret = functools.reduce(lambda x,y: x.alu(red.arg, y), lst)
   if len(reduce_range) == 0: return ret
-  end = acc.index(UOp.const(dtypes.int, 0)).store(ret).end(*reduce_range)
-  ctx.range_to_ends.setdefault(reduce_range, []).append(end)
+  end = acc.index(UOp.const(dtypes.int, 0)).store(ret).end(*reduce_range).rtag("mergeable")
   return acc.after(end).index(UOp.const(dtypes.int, 0))
 
 def merge_reduce_ends(ctx:ReduceContext, sink:UOp):
-  # merge ENDs that share the same range
-  subs = {e: UOp.group(*(e.src[0] for e in ends)).end(*r) for r, ends in ctx.range_to_ends.items() if len(ends) > 1 for e in ends}
+  # merge ENDs that share the same range (only those created by reduce_to_acc)
+  range_to_ends: dict[tuple[UOp, ...], list[UOp]] = {}
+  for u in sink.backward_slice:
+    if u.op is Ops.END and u.tag == "mergeable": range_to_ends.setdefault(u.src[1:], []).append(u)
+  subs = {e: UOp.group(*(e.src[0] for e in ends)).end(*r) for r, ends in range_to_ends.items() if len(ends) > 1 for e in ends}
   return sink.substitute(subs) if subs else None
 
 pm_reduce = PatternMatcher([
