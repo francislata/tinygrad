@@ -1717,6 +1717,12 @@ def train_stable_diffusion():
 
 def train_flux():
   from examples.mlperf.dataloader import batch_load_flux
+  from examples.mlperf.helpers import (
+    generate_labels,
+    create_pos_enc_for_latents,
+    pack_latents,
+    unpack_latents
+  )
   from extra.models.flux import Flux
 
   config = {}
@@ -1728,6 +1734,7 @@ def train_flux():
   BS = config["BS"] = getenv("BS", 16)
   BASEDIR = getenv("BASEDIR", "/raid/datasets/flux/cc12m_preprocessed")
   EMPTYENCDIR = getenv("EMPTYENCDIR", "/raid/datasets/flux/empty_encodings")
+  SMALL = config["SMALL"] = getenv("SMALL")
 
   num_samples = 1099776
   lr = 1e-4
@@ -1735,11 +1742,52 @@ def train_flux():
   lr_warmup_steps = 0
   lr_decay_ratio = 0.0
 
+  for x in GPUS: Device[x]
+
+  def load_model(model_params:dict[str, list|bool|int|float]) -> Flux:
+    model = Flux(**model_params)
+    model.init_weights()
+
+    params = get_parameters(model)
+
+    for x in params:
+      x.to_(GPUS)
+
+    # weights are all bfloat16 for now
+    assert params and all(p.dtype == dtypes.bfloat16 for p in params)
+
+    return model
+
   def get_train_iter() -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
     return batch_load_flux(BS, BASEDIR, empty_enc_dir=EMPTYENCDIR, seed=SEED)
 
-  def train_step(model:Flux, t5_enc:Tensor, clip_enc:Tensor, drop_enc:Tensor, mean:Tensor, logvar:Tensor) -> Tensor:
-    pass
+  def train_step(model:Flux, optim:AdamW, sample) -> Tensor:
+    labels = generate_labels(sample["mean"].shard(GPUS, 0), sample["logvar"].shard(GPUS, 0))
+    timesteps, clip_enc, t5_enc = sample.pop("timestep").shard(GPUS, 0), sample["clip_encodings"].shard(GPUS, 0), sample["t5_encodings"].shard(GPUS, 0)
+
+    noise = Tensor.randn_like(labels)
+    timestep_values = timesteps / 8.0
+    sigmas = timestep_values.view(-1, 1, 1, 1)
+    latents = (1 - sigmas) * labels + sigmas * noise
+
+    b, _, latent_h, latent_w = latents.shape
+    latent_pos_enc = create_pos_enc_for_latents(b, (latent_dims := (latent_h, latent_w)), GPUS)
+    text_pos_enc = Tensor.zeros(b, t5_enc.shape[1], 3, device=GPUS).contiguous().realize()
+
+    latents = pack_latents(latents)
+
+    latent_noise_pred = model(img=latents, img_ids=latent_pos_enc, txt=t5_enc, txt_ids=text_pos_enc, y=clip_enc, timesteps=timestep_values)
+
+    pred = unpack_latents(latent_noise_pred, latent_dims)
+    tgt = noise - labels
+    loss = (pred - tgt).square().mean()
+
+    del pred, noise, tgt
+
+    loss.backward()
+    optim.step()
+
+    return loss.realize()
 
   Tensor.manual_seed(SEED)
 
@@ -1751,31 +1799,46 @@ def train_flux():
 
   # model
   model_params = {
-    "guidance_embed": True,
-    "in_channels": 64,
-    "vec_in_dim": 768,
-    "context_in_dim": 4096,
-    "hidden_size": 3072,
-    "mlp_ratio": 4.0,
-    "num_heads": 24,
-    "depth": 19,
-    "depth_single_blocks": 38,
-    "axes_dim": [16, 56, 56],
-    "theta": 10000,
-    "qkv_bias": True
+    "small": {
+      "guidance_embed": False,
+      "in_channels": 64,
+      "vec_in_dim": 768,
+      "context_in_dim": 512,
+      "hidden_size": 3072,
+      "mlp_ratio": 4.0,
+      "num_heads": 24,
+      "depth": 2,
+      "depth_single_blocks": 2,
+      "axes_dim": [16, 56, 56],
+      "theta": 10000,
+      "qkv_bias": True
+    },
+    "schnell": {
+      "guidance_embed": False,
+      "in_channels": 64,
+      "vec_in_dim": 768,
+      "context_in_dim": 4096,
+      "hidden_size": 3072,
+      "mlp_ratio": 4.0,
+      "num_heads": 24,
+      "depth": 19,
+      "depth_single_blocks": 38,
+      "axes_dim": [16, 56, 56],
+      "theta": 10000,
+      "qkv_bias": True
+    }
   }
-  model = Flux(**model_params)
-  model.init_weights()
+  model = load_model(model_params["small" if SMALL else "schnell"])
 
-  if len(GPUS) > 1:
-    for x in get_parameters(model):
-      x.to_(GPUS)
+  # optim
+  optim = AdamW(get_parameters(model), lr=lr, eps=lr_eps)
 
   train_iter = get_train_iter()
 
   # training loop
   for sample in tqdm(train_iter, total=num_samples//BS):
-    pass
+    loss = train_step(model, optim, sample)
+    print(f"loss: {loss.float().item():.3f}")
 
 if __name__ == "__main__":
   multiprocessing.set_start_method('spawn')
