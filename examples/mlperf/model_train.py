@@ -1762,8 +1762,10 @@ def train_flux():
     return batch_load_flux(BS, BASEDIR, empty_enc_dir=EMPTYENCDIR, seed=SEED)
 
   def train_step(model:Flux, optim:AdamW, sample) -> Tensor:
+    optim.zero_grad()
+
     labels = generate_labels(sample["mean"].shard(GPUS, 0), sample["logvar"].shard(GPUS, 0))
-    timesteps, clip_enc, t5_enc = sample.pop("timestep").shard(GPUS, 0), sample["clip_encodings"].shard(GPUS, 0), sample["t5_encodings"].shard(GPUS, 0)
+    timesteps, clip_enc, t5_enc = Tensor.rand(BS).shard(GPUS, 0), sample["clip_encodings"].shard(GPUS, 0), sample["t5_encodings"].shard(GPUS, 0)
 
     noise = Tensor.randn_like(labels)
     timestep_values = timesteps / 8.0
@@ -1781,7 +1783,6 @@ def train_flux():
     pred = unpack_latents(latent_noise_pred, latent_dims)
     tgt = noise - labels
     loss = (pred - tgt).square().mean()
-
     del pred, noise, tgt
 
     loss.backward()
