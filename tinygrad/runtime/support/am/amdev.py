@@ -1,8 +1,8 @@
 from __future__ import annotations
 import ctypes, collections, dataclasses, functools, hashlib, array
 from tinygrad.helpers import mv_address, getenv, DEBUG, fetch, lo32, hi32
+from tinygrad.runtime.autogen import pci
 from tinygrad.runtime.autogen.am import am
-from tinygrad.runtime.support.hcq import MMIOInterface
 from tinygrad.runtime.support.amd import AMDReg, import_module, import_asic_regs
 from tinygrad.runtime.support.memory import TLSFAllocator, MemoryManager, AddrSpace
 from tinygrad.runtime.support.system import PCIDevice, PCIDevImplBase
@@ -146,8 +146,8 @@ class AMMemoryManager(MemoryManager):
 class AMDev(PCIDevImplBase):
   Version = 0xA0000008
 
-  def __init__(self, pci_dev:PCIDevice, dma_regions:list[tuple[int, MMIOInterface]]|None=None, reset_mode=False):
-    self.pci_dev, self.devfmt, self.dma_regions = pci_dev, pci_dev.pcibus, dma_regions
+  def __init__(self, pci_dev:PCIDevice, reset_mode=False):
+    self.pci_dev, self.devfmt = pci_dev, pci_dev.pcibus
     self.vram, self.doorbell64, self.mmio = self.pci_dev.map_bar(0), self.pci_dev.map_bar(2, fmt='Q'), self.pci_dev.map_bar(5, fmt='I')
 
     self._run_discovery()
@@ -185,6 +185,7 @@ class AMDev(PCIDevImplBase):
 
     # Re-initialize main blocks
     self.init_hw(self.gfx, self.sdma)
+    self.pci_dev.write_config(pci.PCI_COMMAND, self.pci_dev.read_config(pci.PCI_COMMAND, 2) | pci.PCI_COMMAND_MASTER, 2)
 
     self.smu.set_clocks(level=-1) # last level, max perf.
     for ip in [self.soc, self.gfx]: ip.set_clockgating_state()
@@ -225,13 +226,13 @@ class AMDev(PCIDevImplBase):
     self.ih.interrupt_handler()
     self.reg("regSCRATCH_REG6").write(self.is_err_state) # set finalized state.
 
-  def recover(self) -> bool:
-    if not self.is_err_state: return False
-    if DEBUG >= 2: print(f"am {self.devfmt}: Start recovery")
+  def recover(self, force=False) -> bool:
+    if not force and not self.is_err_state: return False
+    if DEBUG >= 3: print(f"am {self.devfmt}: Start recovery")
     self.ih.interrupt_handler()
     self.gfx.reset_mec()
     self.is_err_state = False
-    if DEBUG >= 2: print(f"am {self.devfmt}: Recovery complete")
+    if DEBUG >= 3: print(f"am {self.devfmt}: Recovery complete")
     return True
 
   def is_hive(self) -> bool: return self.gmc.xgmi_seg_sz > 0
@@ -243,14 +244,14 @@ class AMDev(PCIDevImplBase):
   def reg(self, reg:str) -> AMRegister: return self.__dict__[reg]
 
   def rreg(self, reg:int) -> int:
-    val = self.indirect_rreg(reg) if reg > len(self.mmio) else self.mmio[reg]
+    val = self.indirect_rreg(reg) if reg >= len(self.mmio) else self.mmio[reg]
     if AM_DEBUG >= 4 and getattr(self, '_prev_rreg', None) != (reg, val): print(f"am {self.devfmt}: Reading register {reg:#x} with value {val:#x}")
     self._prev_rreg = (reg, val)
     return val
 
   def wreg(self, reg:int, val:int):
     if AM_DEBUG >= 4: print(f"am {self.devfmt}: Writing register {reg:#x} with value {val:#x}")
-    if reg > len(self.mmio): self.indirect_wreg(reg, val)
+    if reg >= len(self.mmio): self.indirect_wreg(reg, val)
     else: self.mmio[reg] = val
 
   def wreg_pair(self, reg_base:str, lo_suffix:str, hi_suffix:str, val:int, inst:int=0):
