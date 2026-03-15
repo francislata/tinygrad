@@ -1737,7 +1737,7 @@ def train_flux():
     pack_latents,
     unpack_latents
   )
-  from extra.models.flux import Flux
+  from examples.mlperf.models.flux import Flux
 
   config = {}
 

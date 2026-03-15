@@ -506,7 +506,7 @@ def eval_flux():
     pack_latents,
     unpack_latents
   )
-  from extra.models.flux import Flux
+  from examples.mlperf.models.flux import Flux
 
   def load_model(devices):
     model_weights = fetch("https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors")
