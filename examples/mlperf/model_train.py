@@ -1748,7 +1748,6 @@ def train_flux():
   BS = config["BS"] = getenv("BS", 16)
   BASEDIR = getenv("BASEDIR", "/raid/datasets/flux/cc12m_preprocessed")
   EMPTYENCDIR = getenv("EMPTYENCDIR", "/raid/datasets/flux/empty_encodings")
-  SMALL = config["SMALL"] = getenv("SMALL")
 
   num_samples = 1099776
   lr = 1e-4
@@ -1814,36 +1813,20 @@ def train_flux():
 
   # model
   model_params = {
-    "small": {
-      "guidance_embed": False,
-      "in_channels": 64,
-      "vec_in_dim": 768,
-      "context_in_dim": 512,
-      "hidden_size": 3072,
-      "mlp_ratio": 4.0,
-      "num_heads": 24,
-      "depth": 2,
-      "depth_single_blocks": 2,
-      "axes_dim": [16, 56, 56],
-      "theta": 10000,
-      "qkv_bias": True
-    },
-    "schnell": {
-      "guidance_embed": False,
-      "in_channels": 64,
-      "vec_in_dim": 768,
-      "context_in_dim": 4096,
-      "hidden_size": 3072,
-      "mlp_ratio": 4.0,
-      "num_heads": 24,
-      "depth": 19,
-      "depth_single_blocks": 38,
-      "axes_dim": [16, 56, 56],
-      "theta": 10000,
-      "qkv_bias": True
-    }
+    "guidance_embed": False,
+    "in_channels": 64,
+    "vec_in_dim": 768,
+    "context_in_dim": 4096,
+    "hidden_size": 3072,
+    "mlp_ratio": 4.0,
+    "num_heads": 24,
+    "depth": 19,
+    "depth_single_blocks": 38,
+    "axes_dim": [16, 56, 56],
+    "theta": 10000,
+    "qkv_bias": True
   }
-  model = load_model(model_params["small" if SMALL else "schnell"])
+  model = load_model(model_params)
 
   # optim
   optim = AdamW(get_parameters(model), lr=lr, eps=lr_eps)
