@@ -1777,8 +1777,9 @@ def train_flux():
   def train_step(model:Flux, optim:AdamW, sample) -> Tensor:
     optim.zero_grad()
 
-    labels = generate_labels(sample["mean"].shard(GPUS, 0), sample["logvar"].shard(GPUS, 0))
-    timesteps, clip_enc, t5_enc = Tensor.rand(BS).shard(GPUS, 0), sample["clip_encodings"].shard(GPUS, 0), sample["t5_encodings"].shard(GPUS, 0)
+    for k in sample: sample[k].shard_(GPUS, axis=0)
+    labels = generate_labels(sample["mean"], sample["logvar"])
+    timesteps, clip_enc, t5_enc = Tensor.rand(BS).shard(GPUS, 0), sample["clip_encodings"], sample["t5_encodings"]
 
     noise = Tensor.randn_like(labels)
     timestep_values = timesteps / 8.0
