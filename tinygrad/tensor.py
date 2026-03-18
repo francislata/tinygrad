@@ -242,7 +242,8 @@ class Tensor(OpMixin):
       param = UOp.param(slot, self.dtype, self.shape, self.device)
     return Tensor(param, device=self.device)
   def call(self, *lst:Tensor, fxn:Tensor|UOp, grad_fxn:Callable|None=None) -> Tensor:
-    return Tensor((fxn.uop if isinstance(fxn, Tensor) else fxn).call(*[t.uop for t in (self,)+lst], grad_fxn=grad_fxn), device=self.device)
+    fret = (fxn.uop if isinstance(fxn, Tensor) else fxn).call(*[t.uop for t in (self,)+lst], grad_fxn=grad_fxn)
+    return Tensor(fret.gettuple(0), device=self.device)
 
   def custom_kernel(self, *lst:Tensor, fxn:Callable, grad_fxn:Callable|None=None) -> list[Tensor]:
     """
@@ -308,20 +309,18 @@ class Tensor(OpMixin):
     if is_disk:
       self._buffer().copyin(x._data())
       return self
-    # NOTE: assign_uop is created before AFTER embedding (uses original self.uop),
-    # but AFTER must be embedded before _apply_uop (so subsequent assigns see it)
-    assign_uop = self.uop.assign(x.uop)
-    base = self.uop.base
-    if base.op in {Ops.BUFFER, Ops.AFTER} and not self.uop.has_buffer_identity():
-      original_uop = self.uop
-      assigned_base = base.after(assign_uop)
-      _apply_map_to_tensors({base: assigned_base}, name="Embed View Assign", walk=True)
-      def replace_view_base(u:UOp) -> UOp:
-        return u.replace(src=((assigned_base if u.src[0] is base else replace_view_base(u.src[0])),)+u.src[1:])
-      ret = Tensor(replace_view_base(original_uop), device=self.device, requires_grad=self.requires_grad)
-      self.replace(self._apply_uop(lambda *_: assign_uop, x))
-      return ret
-    return self.replace(self._apply_uop(lambda *_: assign_uop, x))
+    # STORE+AFTER: STORE is the write effect (void), AFTER wraps the view for correct shape/ranging
+    assign = self.uop.after(self.uop.store(x.uop))
+    if (base := self.uop.base).op in {Ops.BUFFER, Ops.AFTER} and self.uop is not base and not self.uop.has_buffer_identity():
+      # view assign: replace at the buffer-identity level (e.g. RESHAPE(BUFFER)) so @function's substitution catches it
+      ib = self.uop
+      while not ib.has_buffer_identity() and ib is not base: ib = ib.src[0]
+      assigned_ib = ib.after(assign)
+      _apply_map_to_tensors({ib: assigned_ib}, name="Embed View Assign", walk=True)
+    else:
+      # simple assign
+      self.uop = assign
+    return self
 
   def detach(self) -> Tensor:
     """
@@ -631,15 +630,32 @@ class Tensor(OpMixin):
       Tensor._device_seeds[device] = Tensor(
         [int.from_bytes(hashlib.sha256(len(Tensor._device_seeds).to_bytes(4, "big")).digest(), "big"), Tensor._seed],
         device=device, dtype=dtypes.uint32, requires_grad=False)
-      Tensor._device_rng_counters[device] = Tensor([num], device=device, dtype=dtypes.uint32, requires_grad=False).contiguous()
+      Tensor._device_rng_counters[device] = Tensor([0, 0], device=device, dtype=dtypes.uint32, requires_grad=False).contiguous()
+
     # increment rng counter for devices
-    else: Tensor._device_rng_counters[device].assign(Tensor._device_rng_counters[device] + num)
+    new_low = Tensor._device_rng_counters[device][0:1] + (num & 0xffffffff)
+    new_high = Tensor._device_rng_counters[device][1:2] + (num >> 32) + (new_low < Tensor._device_rng_counters[device][0]).cast(dtypes.uint32)
+    Tensor._device_rng_counters[device].assign(new_low.cat(new_high))
+
+    low = Tensor._device_rng_counters[device][0:1] - (num & 0xffffffff)
+    high = Tensor._device_rng_counters[device][1:2] - (num >> 32) - (Tensor._device_rng_counters[device][0] < (num & 0xffffffff)).cast(dtypes.uint32)
 
     # threefry random bits
-    bits_count = Tensor._device_rng_counters[device] - num
-    counts0 = (Tensor.arange(ceildiv(num, 2), device=device, dtype=dtypes.uint32, requires_grad=False)+bits_count)
-    counts1 = counts0 + ceildiv(num, 2)
-    bits = Tensor._threefry_random_bits(Tensor._device_seeds[device], counts0, counts1)[:num]
+    if num > dtypes.uint32.max:
+      bits_list = []
+      for i in range(0, num, dtypes.uint32.max):
+        chunk_num = min(num - i, dtypes.uint32.max)
+        c_low = low + (i & 0xffffffff)
+        c_high = high + (i >> 32) + (c_low < low).cast(dtypes.uint32)
+        new_key = Tensor._threefry_random_bits(Tensor._device_seeds[device], c_low, c_high)
+        counts0 = Tensor.arange(ceildiv(chunk_num, 2), device=device, dtype=dtypes.uint32, requires_grad=False)
+        counts1 = counts0 + ceildiv(chunk_num, 2)
+        bits_list.append(Tensor._threefry_random_bits(new_key, counts0, counts1)[:chunk_num])
+      bits = Tensor.cat(*bits_list)
+    else:
+      counts0 = Tensor.arange(ceildiv(num, 2), device=device, dtype=dtypes.uint32, requires_grad=False) + low
+      counts1 = counts0 + ceildiv(num, 2)
+      bits = Tensor._threefry_random_bits(Tensor._device_seeds[device], counts0, counts1)[:num]
 
     # bitcast to uint with same number of bits
     _, nmant = dtypes.finfo(dt)
@@ -1338,7 +1354,8 @@ class Tensor(OpMixin):
              if (t:=tref()) is not None and t is not self and t.uop is not v_uop and t.uop not in v_bw):
         raise RuntimeError("can't setitem on a tensor that already has other uses and requires grad")
       if not isinstance(v, Tensor): v = Tensor(v, device=self.device, dtype=self.dtype)
-      if v.uop.op is Ops.ASSIGN: v = v._apply_uop(lambda x: x.src[1])
+      # __iadd__/__isub__ creates AFTER(view, STORE(view, computed)); unwrap to get the computed value
+      if v.uop.op is Ops.AFTER and any(s.op is Ops.STORE for s in v.uop.src[1:]): v = v._apply_uop(lambda x: x.src[1].src[1])
       self.replace(self._getitem(indices, v))
       return
     idx = [indices] if (isinstance(indices, list) and all_int(indices)) or not isinstance(indices, (tuple, list)) else list(indices)
@@ -1347,14 +1364,14 @@ class Tensor(OpMixin):
       if is_disk: raise RuntimeError("advanced setitem is not supported for DISK tensors")
       if not isinstance(v, Tensor): v = Tensor(v, device=self.device, dtype=self.dtype)
       self.assign(self._getitem(indices, v))
-    elif is_disk or self.uop.is_realized or self.uop.base.op in (Ops.AFTER, Ops.BUFFER): # basic setitem, self is realized
+    elif is_disk or self.uop.is_realized or self.uop.base.op is Ops.BUFFER or self.uop._base_buffer_is_realized(): # basic setitem
       view = self[indices]
-      if isinstance(v, Tensor) and v.uop.op is Ops.ASSIGN and v.uop in view.uop.base.src: return
+      if isinstance(v, Tensor) and v.uop.op is Ops.AFTER and v.uop in view.uop.base.src: return
       view.assign(v)
     else: # basic setitem, self is not realized
       if not isinstance(v, Tensor): v = Tensor(v, device=self.device, dtype=self.dtype)
-      # __iadd__/__isub__ on unrealized views creates a no-op ASSIGN; unwrap to get the computed value
-      if v.uop.op is Ops.ASSIGN: v = v._apply_uop(lambda x: x.src[1])
+      # __iadd__/__isub__ creates AFTER(view, STORE(view, computed)); unwrap to get the computed value
+      if v.uop.op is Ops.AFTER and any(s.op is Ops.STORE for s in v.uop.src[1:]): v = v._apply_uop(lambda x: x.src[1].src[1])
       self.replace(self._getitem(indices, v))
 
   def __delitem__(self, indices) -> None:
@@ -2491,7 +2508,7 @@ class Tensor(OpMixin):
     """
     if IMAGE: return self.image_dot(w, dtype)
     if ASM_GEMM:
-      from extra.gemm.asm.cdna.gemm import can_use_asm_gemm, asm_gemm
+      from extra.gemm.cdna_asm_gemm import can_use_asm_gemm, asm_gemm
       if can_use_asm_gemm(self, w): return asm_gemm(self, w)
     x, dx, dw = self, self.ndim, w.ndim
     if not (dx > 0 and dw > 0): raise RuntimeError(f"both tensors need to be at least 1D, got {dx}D and {dw}D")
@@ -3667,15 +3684,17 @@ class Tensor(OpMixin):
       def ipad(t, i, amt):
         shape = (None,)*i + (amt,) + (None,)*(t.ndim-i-1)
         return Tensor(True, device=t.device).expand(t.shape).pad_to(shape).where(t.pad_to(shape), Invalid) if amt != t.shape[i] else t
-      # align a dimension to 64 bytes
-      def pad_align(t, dim):
-        return ipad(t, dim, round_up(t.shape[dim], (64 // dtsz) // math.gcd(prod(t.shape) // t.shape[dim], (64 // dtsz))))
+
+      # align a dimension, use at to specify the dimension to pad in, defaults to first
+      def pad_align(t, dim, at=None, force=False):
+        # align to 64 pixels when height is real, otherwise 64 bytes is sufficient
+        align = (64 // dtsz) if prod(t.shape[:dim]) == 1 or prod(t.shape) < 16384 * 4 else 256
+        return ipad(t, at:=at or dim, round_up(t.shape[at] + int(force), align // math.gcd(prod(t.shape[dim:]) // t.shape[at], align)))
 
       # bank conflicts
-      if cin >= 8 and is_pow2(cin // 4): x, w = ipad(x.reshape(bs, iy, ix, groups, cin // 4, 4), 4, cin // 4 + 1), ipad(w, 2, cin // 4 + 1)
-
-      # 64-byte pitch alignment
-      x, w = pad_align(x, 2), pad_align(w, 1)
+      if cin >= 8 and is_pow2(cin // 4):
+        x, w = pad_align(x.reshape(bs, iy, ix, groups, cin // 4, 4), 2, at=4, force=True), pad_align(w, 1, at=2, force=True)
+      else: x, w = pad_align(x, 2), pad_align(w, 1)
 
       if FLOAT16: x, w = x.cast(dtypes.half).contiguous().cast(dtypes.float), w.cast(dtypes.half).contiguous().cast(dtypes.float)
       else: x, w = x.contiguous(), w.contiguous()

@@ -272,13 +272,18 @@ class TestAssign(unittest.TestCase):
 
   def test_assign_after(self):
     t = Tensor.zeros(10).contiguous().realize()
-    t.uop = t.uop.after(t.uop.assign((t+1).uop))
+    t.uop = t.uop.after(t.uop.store((t+1).uop))
     np.testing.assert_allclose(t.numpy(), [1.,1.,1.,1.,1.,1.,1.,1.,1.,1.])
 
   def test_assign_after_partial(self):
     t = Tensor.zeros(10).contiguous().realize()
-    t.uop = t.uop.after(t[:5].uop.assign(Tensor.ones(5).uop))
+    t.uop = t.uop.after(t[:5].uop.after(t[:5].uop.store(Tensor.ones(5).uop)))
     np.testing.assert_allclose(t.numpy(), [1.,1.,1.,1.,1.,0.,0.,0.,0.,0.])
+
+  def test_assign_after_target_chain(self):
+    t = Tensor.arange(16).reshape(4, 4).permute(1, 0).contiguous()
+    t.assign(t + 100)
+    np.testing.assert_equal(t.numpy(), [[100, 104, 108, 112], [101, 105, 109, 113], [102, 106, 110, 114], [103, 107, 111, 115]])
 
   def test_assign_contiguous(self):
     b = Tensor.arange(16).reshape(4,4).contiguous().realize()
