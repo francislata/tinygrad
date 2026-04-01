@@ -165,7 +165,7 @@ class CStyleLanguage(Renderer):
 
     child_count = Counter(v for ru in uops for v in ru.src)
     # find which PARAMs are stored to with a single toposort
-    writable_params = {u for u in UOp.sink(*[u.src[0] for u in uops if u.op is Ops.STORE]).toposort() if u.op is Ops.PARAM}
+    writable_params = {u for u in UOp.sink(*[u.src[0] for u in uops if u.op is Ops.STORE]).toposort(lambda u: u.op != Ops.END) if u.op is Ops.PARAM}
     bufs: dict[UOp, tuple[str, tuple[DType, bool]]] = {}
     kernel = []
     depth = 1
@@ -395,10 +395,10 @@ class CUDARenderer(CStyleLanguage):
   def __init__(self, arch:str, device:str="NV", use_nvcc=False):
     from tinygrad.runtime.support.compiler_cuda import NVRTCCompiler, NVCCCompiler
     from tinygrad.runtime.support.hcq import MOCKGPU
-    self.device, self.arch, self.use_nvcc = device, arch, use_nvcc
+    self.device, self.arch = device, arch
     self.compiler = (NVCCCompiler if use_nvcc else NVRTCCompiler)(arch, ptx=bool(MOCKGPU) or device == "CUDA", cache_key=device.lower())
     self.tensor_cores = tc.cuda_sm89 if (ver:=int(arch[3:])) >= 89 else tc.cuda_sm80 if ver >= 80 else tc.cuda_sm75 if ver >= 75 else []
-  def __reduce__(self): return self.__class__, (self.arch, self.device, self.use_nvcc)
+  def __reduce__(self): return self.__class__, (self.arch, self.device)
 
   # language options
   # https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html
@@ -460,6 +460,9 @@ class CUDARenderer(CStyleLanguage):
 
     return super().render_kernel(function_name, kernel, bufs, uops, prefix=prefix)
 
+class NVCCRenderer(CUDARenderer):
+  def __init__(self, arch:str, device:str="NV"): super().__init__(arch, device, use_nvcc=True)
+
 def fp8_index(dtype: DType): return (dtypes.fp8e4m3, dtypes.fp8e5m2).index(dtype.scalar())
 def _ocml(op): return lambda x,dtype: f"__ocml_{op}_f{ {dtypes.half:16, dtypes.double:64}.get(dtype, 32)}({x})"
 
@@ -487,8 +490,8 @@ class AMDHIPRenderer(CStyleLanguage):
         (UPat(Ops.WMMA, name="x"), lambda ctx,x: f"__{x.arg[0]}({ctx[x.src[0]]}, {ctx[x.src[1]]}, {ctx[x.src[2]]},"
           f" {fp8_index(x.src[0].dtype)}, {fp8_index(x.src[0].dtype)}, 0, 0, 0, 0)" if x.arg[1][2] == 128 else None),
         (UPat(Ops.WMMA, name="x"), lambda ctx,x: f"__{x.arg[0]}({ctx[x.src[0]]}, {ctx[x.src[1]]}, {ctx[x.src[2]]}, 0, 0, 0)"),
-        (UPat(Ops.CAST, dtypes.fp8s, (UPat.var("y", dtypes.float),), name="x",),
-          lambda ctx,x,y: f"f32_to_fp8({ctx[x.src[0]]}, {fp8_index(x.dtype)})"),
+        (UPat(Ops.CAST, dtypes.fp8s, (UPat(dtype=dtypes.float),), name="x",),
+          lambda ctx,x: f"f32_to_fp8({ctx[x.src[0]]}, {fp8_index(x.dtype)})"),
         (UPat(Ops.CAST, dtypes.float, (UPat.var("y", dtypes.fp8s),), name="x",),
           lambda ctx,x,y: f"__builtin_amdgcn_cvt_f32_{('fp8', 'bf8')[fp8_index(y.dtype)]}((unsigned int){ctx[x.src[0]]}, 0)"),
       ]) + base_rewrite
