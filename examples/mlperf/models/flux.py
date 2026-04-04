@@ -32,6 +32,20 @@ def attention(q:Tensor, k:Tensor, v:Tensor, pe:Tensor) -> Tensor:
   x = Tensor.scaled_dot_product_attention(q, k, v)
   return x.rearrange("B H L D -> B L (H D)")
 
+def split_qkv(qkv:Tensor, num_heads:int) -> tuple[Tensor, Tensor, Tensor]:
+  """Split QKV tensor into Q, K, V. Handles both standard [Q,K,V] and head-interleaved [qkv_h0,qkv_h1,...] layouts."""
+  B, L, _ = qkv.shape
+  D = qkv.shape[-1] // (3 * num_heads)
+  if isinstance(qkv.device, tuple):
+    # TP path: weights reordered to head-interleaved, reshape to (B, L, H, 3, D) — H is shard axis
+    qkv = qkv.reshape(B, L, num_heads, 3, D)
+    q, k, v = qkv[:,:,:,0,:], qkv[:,:,:,1,:], qkv[:,:,:,2,:]
+  else:
+    # Standard path: [Q, K, V] layout, reshape to (B, L, 3, H, D)
+    qkv = qkv.reshape(B, L, 3, num_heads, D)
+    q, k, v = qkv[:,:,0,:,:], qkv[:,:,1,:,:], qkv[:,:,2,:,:]
+  return q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
 def rope(pos:Tensor, dim:int, theta:int) -> Tensor:
   assert dim % 2 == 0
   scale = Tensor.arange(0, dim, 2, dtype=dtypes.float32, device=pos.device) / dim # NOTE: this is torch.float64 in reference implementation
@@ -94,7 +108,7 @@ class SelfAttention:
 
   def __call__(self, x:Tensor, pe:Tensor) -> Tensor:
     qkv = self.qkv(x)
-    q, k, v = qkv.rearrange("B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+    q, k, v = split_qkv(qkv, self.num_heads)
     q, k = self.norm(q, k)
     x = attention(q, k, v, pe=pe)
     return self.proj(x)
@@ -151,14 +165,14 @@ class DoubleStreamBlock:
     img_modulated = self.img_norm1(img)
     img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
     img_qkv = self.img_attn.qkv(img_modulated)
-    img_q, img_k, img_v = img_qkv.rearrange("B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+    img_q, img_k, img_v = split_qkv(img_qkv, self.num_heads)
     img_q, img_k = self.img_attn.norm(img_q, img_k)
 
     # prepare txt for attention
     txt_modulated = self.txt_norm1(txt)
     txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
     txt_qkv = self.txt_attn.qkv(txt_modulated)
-    txt_q, txt_k, txt_v = txt_qkv.rearrange("B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+    txt_q, txt_k, txt_v = split_qkv(txt_qkv, self.num_heads)
     txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k)
 
     # run actual attention
@@ -216,14 +230,23 @@ class SingleStreamBlock:
   def __call__(self, x:Tensor, vec:Tensor, pe:Tensor) -> Tensor:
     mod, _ = self.modulation(vec)
     x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
-    qkv, mlp = Tensor.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
-    q, k, v = qkv.rearrange("B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+    if hasattr(self, 'qkv_weight'):
+      # TP path: linear1 split into separate qkv and mlp projections
+      qkv = x_mod.linear(self.qkv_weight.transpose(), self.qkv_bias)
+      mlp = x_mod.linear(self.mlp_in_weight.transpose(), self.mlp_in_bias)
+    else:
+      qkv, mlp = Tensor.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
+    q, k, v = split_qkv(qkv, self.num_heads)
     q, k = self.norm(q, k)
 
     # compute attention
     attn = attention(q, k, v, pe=pe)
-    # compute activation in mlp stream, cat again and run second linear layer
-    output = self.linear2(Tensor.cat(attn, self.mlp_act(mlp), dim=2))
+    # compute activation in mlp stream, then run second linear layer
+    if hasattr(self, 'attn_out_weight'):
+      # TP path: linear2 split to avoid cat on sharded dim; linear2(cat(a,m)) = a@Wa.T + m@Wm.T + b
+      output = attn.linear(self.attn_out_weight.transpose()) + self.mlp_act(mlp).linear(self.mlp_out_weight.transpose()) + self.linear2_bias
+    else:
+      output = self.linear2(Tensor.cat(attn, self.mlp_act(mlp), dim=2))
     return x + mod.gate * output
   
   def init_weights(self):
@@ -330,16 +353,102 @@ class Flux:
     txt = self.txt_in(txt)
     ids = Tensor.cat(txt_ids, img_ids, dim=1)
     pe = self.pe_embedder(ids)
-    for double_block in self.double_blocks:
-      img, txt = double_block(img=img, txt=txt, vec=vec, pe=pe)
-
-    img = Tensor.cat(txt, img, dim=1)
-    for single_block in self.single_blocks:
-      img = single_block(img, vec=vec, pe=pe)
+    if hasattr(self, '_run_double'):
+      for block in self.double_blocks:
+        img, txt = self._run_double(block, img, txt, vec, pe)
+      img = Tensor.cat(txt, img, dim=1)
+      for block in self.single_blocks:
+        img = self._run_single(block, img, vec, pe)
+    else:
+      for block in self.double_blocks:
+        img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+      img = Tensor.cat(txt, img, dim=1)
+      for block in self.single_blocks:
+        img = block(img, vec=vec, pe=pe)
 
     img = img[:, txt.shape[1] :, ...]
 
     return self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
+
+  def shard(self, devices):
+    from tinygrad.nn.state import get_parameters
+    num_heads, head_dim = self.num_heads, self.hidden_size // self.num_heads
+
+    def _reorder_qkv(weight, bias):
+      """Reorder QKV from [Q_all,K_all,V_all] to head-interleaved [qkv_h0,qkv_h1,...] for shard-compatible reshape."""
+      # weight: (3*H*D, in) → (3, H, D, in) → (H, 3, D, in) → (H*3*D, in)
+      w = weight.reshape(3, num_heads, head_dim, -1).permute(1, 0, 2, 3).contiguous().reshape(weight.shape[0], -1)
+      b = bias.reshape(3, num_heads, head_dim).permute(1, 0, 2).contiguous().reshape(-1)
+      return w, b
+
+    # Small embedding/output layers — replicate
+    for p in get_parameters(self.img_in): p.shard_(devices, axis=None)
+    for p in get_parameters(self.txt_in): p.shard_(devices, axis=None)
+    for p in get_parameters(self.time_in): p.shard_(devices, axis=None)
+    for p in get_parameters(self.vector_in): p.shard_(devices, axis=None)
+    if isinstance(self.guidance_in, MLPEmbedder):
+      for p in get_parameters(self.guidance_in): p.shard_(devices, axis=None)
+    for p in get_parameters(self.final_layer): p.shard_(devices, axis=None)
+
+    # DoubleStreamBlocks — Megatron-style TP
+    for block in self.double_blocks:
+      for attn in [block.img_attn, block.txt_attn]:
+        # Reorder QKV to head-interleaved layout, then column-parallel
+        attn.qkv.weight, attn.qkv.bias = _reorder_qkv(attn.qkv.weight, attn.qkv.bias)
+        attn.qkv.weight.shard_(devices, axis=0)
+        attn.qkv.bias.shard_(devices, axis=0)
+        # Row-parallel: proj (shard input dim)
+        attn.proj.weight.shard_(devices, axis=1)
+        attn.proj.bias.shard_(devices, axis=None)
+        # Replicate: QKNorm
+        for p in get_parameters(attn.norm): p.shard_(devices, axis=None)
+      for mlp in [block.img_mlp, block.txt_mlp]:
+        # Column-parallel: MLP in
+        mlp[0].weight.shard_(devices, axis=0)
+        mlp[0].bias.shard_(devices, axis=0)
+        # Row-parallel: MLP out
+        mlp[2].weight.shard_(devices, axis=1)
+        mlp[2].bias.shard_(devices, axis=None)
+      # Row-parallel modulation: shard weight on input dim (axis=1) to save memory.
+      # With replicated vec input, the dot allreduces correctly to produce replicated output.
+      for mod in [block.img_mod, block.txt_mod]:
+        mod.lin.weight.shard_(devices, axis=1)
+        mod.lin.bias.shard_(devices, axis=None)
+
+    # SingleStreamBlocks — split fused linear1 into separate qkv + mlp projections for TP
+    for block in self.single_blocks:
+      hs = block.hidden_size
+      # Split linear1 (fused QKV+MLP) into separate projections
+      w_qkv, w_mlp = block.linear1.weight[:3*hs], block.linear1.weight[3*hs:]
+      b_qkv, b_mlp = block.linear1.bias[:3*hs], block.linear1.bias[3*hs:]
+      # Reorder QKV to head-interleaved
+      w_qkv, b_qkv = _reorder_qkv(w_qkv, b_qkv)
+      # Store as separate attributes and shard column-parallel
+      block.qkv_weight = w_qkv.contiguous(); block.qkv_weight.shard_(devices, axis=0)
+      block.qkv_bias = b_qkv.contiguous(); block.qkv_bias.shard_(devices, axis=0)
+      block.mlp_in_weight = w_mlp.contiguous(); block.mlp_in_weight.shard_(devices, axis=0)
+      block.mlp_in_bias = b_mlp.contiguous(); block.mlp_in_bias.shard_(devices, axis=0)
+      del block.linear1
+      # Split linear2 (fused attn_out+mlp_out) into separate row-parallel projections
+      # This avoids Tensor.cat on sharded dim which tinygrad doesn't support
+      block.attn_out_weight = block.linear2.weight[:, :hs].contiguous(); block.attn_out_weight.shard_(devices, axis=1)
+      block.mlp_out_weight = block.linear2.weight[:, hs:].contiguous(); block.mlp_out_weight.shard_(devices, axis=1)
+      block.linear2_bias = block.linear2.bias; block.linear2_bias.shard_(devices, axis=None)
+      del block.linear2
+      # Row-parallel modulation: shard weight on input dim (axis=1) to save memory.
+      block.modulation.lin.weight.shard_(devices, axis=1)
+      block.modulation.lin.bias.shard_(devices, axis=None)
+      # Replicate: QKNorm
+      for p in get_parameters(block.norm): p.shard_(devices, axis=None)
+
+    # Wrap block calls with @function to compile each block's forward+backward separately.
+    # Blocks are passed as explicit args so get_state_dict finds their weights — this is needed because
+    # pm_ctx only matches Ops.BUFFER, not Ops.MULTI, so sharded weights aren't found as implicit inputs.
+    from tinygrad.function import function as tg_function
+    def _run_double(block, img, txt, vec, pe): return block(img=img, txt=txt, vec=vec, pe=pe)
+    def _run_single(block, x, vec, pe): return block(x, vec=vec, pe=pe)
+    self._run_double = tg_function(_run_double, precompile=True, precompile_backward=True)
+    self._run_single = tg_function(_run_single, precompile=True, precompile_backward=True)
 
   def init_weights(self):
     self.img_in.weight = Tensor.glorot_uniform(*self.img_in.weight.shape)

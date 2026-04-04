@@ -1798,11 +1798,10 @@ def train_flux():
     model = Flux(**model_params)
     model.init_weights()
 
+    # tensor parallelism: shard attention/MLP weights across GPUs, replicate small params
+    model.shard(GPUS)
+
     params = get_parameters(model)
-
-    for x in params:
-      x.to_(GPUS)
-
     # weights are all bfloat16 for now
     assert params and all(p.dtype == dtypes.bfloat16 for p in params)
 
@@ -1814,9 +1813,11 @@ def train_flux():
   def train_step(model:Flux, optim:AdamW, sample) -> Tensor:
     optim.zero_grad()
 
-    for k in sample: sample[k].shard_(GPUS, axis=0)
+    # Replicate data across all GPUs (not batch-shard) — TP requires replicated data to avoid
+    # axis mismatches in dot decomposition that would materialize ~232GB intermediate tensors per matmul.
+    for k in sample: sample[k].shard_(GPUS, axis=None)
     labels = generate_labels(sample["mean"], sample["logvar"])
-    timesteps, clip_enc, t5_enc = Tensor.rand(BS).shard(GPUS, 0), sample["clip_encodings"], sample["t5_encodings"]
+    timesteps, clip_enc, t5_enc = Tensor.rand(BS).shard(GPUS, None), sample["clip_encodings"], sample["t5_encodings"]
 
     noise = Tensor.randn_like(labels)
     timestep_values = timesteps / 8.0
@@ -1834,12 +1835,19 @@ def train_flux():
     pred = unpack_latents(latent_noise_pred, latent_dims)
     tgt = noise - labels
     loss = (pred - tgt).square().mean()
-    del pred, noise, tgt
+    del pred, noise, tgt, latent_noise_pred, latents, t5_enc, clip_enc, latent_pos_enc, text_pos_enc, labels, sigmas, timestep_values
 
+    # backward must happen BEFORE realize — realize replaces the uop with a plain BUFFER,
+    # destroying the computation graph that backward needs to traverse.
     loss.backward()
+    # Fix gradient axes: backward through precompiled CALLs can produce gradients with
+    # wrong MULTI axis for replicated params. Unshard to single device then re-shard to match.
+    for p in optim.params:
+      if p.grad is not None and isinstance(p.device, tuple) and p.grad.uop.axis != p.uop.axis:
+        p.grad = p.grad.to(p.device[0]).shard(p.device, p.uop.axis)
     optim.step()
 
-    return loss.realize()
+    return loss
 
   Tensor.manual_seed(SEED)
 
@@ -1865,6 +1873,8 @@ def train_flux():
     "qkv_bias": True
   }
   model = load_model(model_params)
+  # Realize weights now so their init ops are not fused into the first training step's schedule.
+  Tensor.realize(*get_parameters(model))
 
   # optim
   optim = AdamW(get_parameters(model), lr=lr, eps=lr_eps)
