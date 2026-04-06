@@ -1829,7 +1829,7 @@ def train_flux():
     pred = unpack_latents(latent_noise_pred, latent_dims)
     tgt = noise - labels
     loss = (pred - tgt).square().mean()
-    del pred, noise, tgt, latent_noise_pred, latents, t5_enc, clip_enc, latent_pos_enc, text_pos_enc, labels, sigmas, timestep_values
+    del pred, noise, tgt
 
     # backward must happen BEFORE realize — realize replaces the uop with a plain BUFFER,
     # destroying the computation graph that backward needs to traverse.
