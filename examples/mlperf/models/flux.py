@@ -371,7 +371,6 @@ class Flux:
     return self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
 
   def shard(self, devices):
-    from tinygrad.nn.state import get_parameters
     num_heads, head_dim = self.num_heads, self.hidden_size // self.num_heads
 
     def _reorder_qkv(weight, bias):
@@ -382,13 +381,13 @@ class Flux:
       return w, b
 
     # Small embedding/output layers — replicate
-    for p in get_parameters(self.img_in): p.shard_(devices, axis=None)
-    for p in get_parameters(self.txt_in): p.shard_(devices, axis=None)
-    for p in get_parameters(self.time_in): p.shard_(devices, axis=None)
-    for p in get_parameters(self.vector_in): p.shard_(devices, axis=None)
+    for p in nn.state.get_parameters(self.img_in): p.shard_(devices, axis=None)
+    for p in nn.state.get_parameters(self.txt_in): p.shard_(devices, axis=None)
+    for p in nn.state.get_parameters(self.time_in): p.shard_(devices, axis=None)
+    for p in nn.state.get_parameters(self.vector_in): p.shard_(devices, axis=None)
     if isinstance(self.guidance_in, MLPEmbedder):
-      for p in get_parameters(self.guidance_in): p.shard_(devices, axis=None)
-    for p in get_parameters(self.final_layer): p.shard_(devices, axis=None)
+      for p in nn.state.get_parameters(self.guidance_in): p.shard_(devices, axis=None)
+    for p in nn.state.get_parameters(self.final_layer): p.shard_(devices, axis=None)
 
     # DoubleStreamBlocks — Megatron-style TP
     for block in self.double_blocks:
@@ -401,7 +400,7 @@ class Flux:
         attn.proj.weight.shard_(devices, axis=1)
         attn.proj.bias.shard_(devices, axis=None)
         # Replicate: QKNorm
-        for p in get_parameters(attn.norm): p.shard_(devices, axis=None)
+        for p in nn.state.get_parameters(attn.norm): p.shard_(devices, axis=None)
       for mlp in [block.img_mlp, block.txt_mlp]:
         # Column-parallel: MLP in
         mlp[0].weight.shard_(devices, axis=0)
@@ -439,7 +438,7 @@ class Flux:
       block.modulation.lin.weight.shard_(devices, axis=1)
       block.modulation.lin.bias.shard_(devices, axis=None)
       # Replicate: QKNorm
-      for p in get_parameters(block.norm): p.shard_(devices, axis=None)
+      for p in nn.state.get_parameters(block.norm): p.shard_(devices, axis=None)
 
     # Wrap block calls with @function to compile each block's forward+backward separately.
     # Blocks are passed as explicit args so get_state_dict finds their weights — this is needed because

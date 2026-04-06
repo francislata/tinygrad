@@ -1796,15 +1796,9 @@ def train_flux():
 
   def load_model(model_params:dict[str, list|bool|int|float]) -> Flux:
     model = Flux(**model_params)
+
     model.init_weights()
-
-    # tensor parallelism: shard attention/MLP weights across GPUs, replicate small params
     model.shard(GPUS)
-
-    params = get_parameters(model)
-    # weights are all bfloat16 for now
-    assert params and all(p.dtype == dtypes.bfloat16 for p in params)
-
     return model
 
   def get_train_iter() -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
