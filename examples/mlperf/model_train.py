@@ -1803,6 +1803,9 @@ def train_flux():
 
     model.init_weights()
     model.shard(GPUS)
+
+    Tensor.realize(*get_parameters(model))
+
     return model
 
   def get_train_iter() -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
@@ -1865,8 +1868,6 @@ def train_flux():
     "qkv_bias": True
   }
   model = load_model(model_params)
-  # Realize weights now so their init ops are not fused into the first training step's schedule.
-  Tensor.realize(*get_parameters(model))
 
   # optim
   optim = AdamW(get_parameters(model), lr=lr, eps=lr_eps)
