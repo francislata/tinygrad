@@ -1767,6 +1767,7 @@ def train_stable_diffusion():
     t6 = time.perf_counter()
 
 def train_flux():
+  # BS=6 GPUS=6 DEFAULT_FLOAT=bfloat16 OPTIM_DTYPE=bfloat16 PYTHONPATH=. MODEL=flux python3 examples/mlperf/model_train.py
   from examples.mlperf.dataloader import batch_load_flux
   from examples.mlperf.helpers import (
     generate_labels,
@@ -1807,8 +1808,6 @@ def train_flux():
   def train_step(model:Flux, optim:AdamW, sample) -> Tensor:
     optim.zero_grad()
 
-    # Replicate data across all GPUs (not batch-shard) — TP requires replicated data to avoid
-    # axis mismatches in dot decomposition that would materialize ~232GB intermediate tensors per matmul.
     for k in sample: sample[k].shard_(GPUS, axis=None)
     labels = generate_labels(sample["mean"], sample["logvar"])
     timesteps, clip_enc, t5_enc = Tensor.rand(BS).shard(GPUS, None), sample["clip_encodings"], sample["t5_encodings"]
@@ -1831,11 +1830,7 @@ def train_flux():
     loss = (pred - tgt).square().mean()
     del pred, noise, tgt
 
-    # backward must happen BEFORE realize — realize replaces the uop with a plain BUFFER,
-    # destroying the computation graph that backward needs to traverse.
     loss.backward()
-    # Fix gradient axes: backward through precompiled CALLs can produce gradients with
-    # wrong MULTI axis for replicated params. Unshard to single device then re-shard to match.
     for p in optim.params:
       if p.grad is not None and isinstance(p.device, tuple) and p.grad.uop.axis != p.uop.axis:
         p.grad = p.grad.to(p.device[0]).shard(p.device, p.uop.axis)

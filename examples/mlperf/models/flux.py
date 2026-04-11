@@ -353,18 +353,11 @@ class Flux:
     txt = self.txt_in(txt)
     ids = Tensor.cat(txt_ids, img_ids, dim=1)
     pe = self.pe_embedder(ids)
-    if hasattr(self, '_run_double'):
-      for block in self.double_blocks:
-        img, txt = self._run_double(block, img, txt, vec, pe)
-      img = Tensor.cat(txt, img, dim=1)
-      for block in self.single_blocks:
-        img = self._run_single(block, img, vec, pe)
-    else:
-      for block in self.double_blocks:
-        img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
-      img = Tensor.cat(txt, img, dim=1)
-      for block in self.single_blocks:
-        img = block(img, vec=vec, pe=pe)
+    for block in self.double_blocks:
+      img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+    img = Tensor.cat(txt, img, dim=1)
+    for block in self.single_blocks:
+      img = block(img, vec=vec, pe=pe)
 
     img = img[:, txt.shape[1] :, ...]
 
@@ -440,14 +433,6 @@ class Flux:
       # Replicate: QKNorm
       for p in nn.state.get_parameters(block.norm): p.shard_(devices, axis=None)
 
-    # Wrap block calls with @function to compile each block's forward+backward separately.
-    # Blocks are passed as explicit args so get_state_dict finds their weights — this is needed because
-    # pm_ctx only matches Ops.BUFFER, not Ops.MULTI, so sharded weights aren't found as implicit inputs.
-    from tinygrad.function import function as tg_function
-    def _run_double(block, img, txt, vec, pe): return block(img=img, txt=txt, vec=vec, pe=pe)
-    def _run_single(block, x, vec, pe): return block(x, vec=vec, pe=pe)
-    self._run_double = tg_function(_run_double, precompile=True, precompile_backward=True)
-    self._run_single = tg_function(_run_single, precompile=True, precompile_backward=True)
 
   def init_weights(self):
     self.img_in.weight = Tensor.glorot_uniform(*self.img_in.weight.shape)
