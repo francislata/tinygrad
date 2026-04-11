@@ -7,21 +7,16 @@ if TYPE_CHECKING: import numpy
 from tinygrad.dtype import DType, DTypeLike, dtypes, ConstType, least_upper_float, least_upper_dtype, to_dtype, truncate
 from tinygrad.dtype import _from_np_dtype, _to_np_dtype, PyConst, Invalid, InvalidType
 from tinygrad.helpers import argfix, make_tuple, flatten, prod, all_int, round_up, merge_dicts, argsort, getenv, all_same, fully_flatten
-from tinygrad.helpers import IMAGE, FLOAT16, WINO, Metadata, TRACEMETA, ASM_GEMM, ceildiv, fetch, is_numpy_ndarray, TracingKey, cpu_profile
+from tinygrad.helpers import IMAGE, FLOAT16, WINO, Metadata, TRACEMETA, ceildiv, fetch, is_numpy_ndarray, TracingKey, cpu_profile
 from tinygrad.helpers import suppress_finalizing, disable_gc
 from tinygrad.gradient import compute_gradient
 from tinygrad.mixin import OpMixin
 from tinygrad.uop.ops import smax, smin, resolve, UOp, Ops, sint, identity_element, all_metadata, _index_to_concrete_int, sint_to_uop, Variable
 from tinygrad.uop.ops import _broadcast_shape
 from tinygrad.engine.schedule import ExecItem, complete_create_schedule_with_vars
-from tinygrad.device import Buffer
+from tinygrad.device import Buffer, canonicalize_device
 from tinygrad.engine.realize import run_schedule
 from tinygrad.engine.allocations import transform_to_call
-
-def canonicalize_device(device:str|tuple|list|None) -> str|tuple[str, ...]:
-  from tinygrad.device import Device
-  if not isinstance(device, (tuple, list)): return Device.canonicalize(device)
-  return canonical[0] if len(canonical:=tuple(Device.canonicalize(d) for d in device)) == 1 else canonical
 
 # *** all in scope Tensors are here. this gets relevant UOps ***
 
@@ -832,7 +827,7 @@ class Tensor(OpMixin):
     if isinstance(self.device, tuple): return self._multi_like(Tensor.rand, **kwargs)
     return Tensor.rand(*self.shape, device=kwargs.pop("device", self.device), dtype=kwargs.pop("dtype", self.dtype), **kwargs)
 
-  # ***** rng hlops *****
+  # ***** random functions *****
 
   def randn_like(self, dtype:DTypeLike|None=None, requires_grad:bool|None=None, **kwargs) -> Tensor:
     """
@@ -880,9 +875,8 @@ class Tensor(OpMixin):
     print(Tensor.randint(2, 3, low=5, high=10).numpy())
     ```
     """
-    if not isinstance(low, int) or not isinstance(high, int): raise TypeError(f"{low=} and {high=} must be integers")
-    dtype = to_dtype(dtype)
-    if not dtypes.is_int(dtype): raise TypeError(f"{dtype=} must be int")
+    if not all_int([low, high]): raise TypeError(f"{low=} and {high=} must be integers")
+    if not dtypes.is_int(dtype := to_dtype(dtype)): raise TypeError(f"{dtype=} must be int")
     return Tensor.uniform(*shape, low=low, high=high, dtype=dtype, **kwargs)
 
   @staticmethod
@@ -898,7 +892,7 @@ class Tensor(OpMixin):
     print(Tensor.normal(2, 3, mean=10, std=2).numpy())
     ```
     """
-    return ((std * Tensor.randn(*shape, **kwargs)) + mean).requires_grad_(requires_grad)
+    return (std * Tensor.randn(*shape, **kwargs) + mean).requires_grad_(requires_grad)
 
   @staticmethod
   def uniform(*shape, low=0.0, high=1.0, dtype:DTypeLike|None=None, requires_grad:bool|None=None, **kwargs) -> Tensor:
@@ -931,7 +925,6 @@ class Tensor(OpMixin):
     """
     return Tensor.uniform(*shape, low=-1.0, high=1.0, **kwargs).mul(prod(argfix(*shape))**-0.5)
 
-  # https://www.tensorflow.org/api_docs/python/tf/keras/initializers/GlorotUniform
   @staticmethod
   def glorot_uniform(*shape, **kwargs) -> Tensor:
     """
@@ -945,9 +938,9 @@ class Tensor(OpMixin):
     print(Tensor.glorot_uniform(2, 3).numpy())
     ```
     """
-    return Tensor.uniform(*shape, low=-1.0, high=1.0, **kwargs).mul((6/(argfix(*shape)[0]+prod(argfix(*shape)[1:])))**0.5)
+    bound = (6 / (argfix(*shape)[0]+prod(argfix(*shape)[1:]))) ** 0.5
+    return Tensor.uniform(*shape, low=-bound, high=bound, **kwargs)
 
-  # https://pytorch.org/docs/stable/_modules/torch/nn/init.html#kaiming_uniform_
   @staticmethod
   def kaiming_uniform(*shape, a:float = 0.01, **kwargs) -> Tensor:
     """
@@ -961,10 +954,9 @@ class Tensor(OpMixin):
     print(Tensor.kaiming_uniform(2, 3).numpy())
     ```
     """
-    bound = math.sqrt(3.0) * math.sqrt(2.0 / (1 + a ** 2)) / math.sqrt(prod(argfix(*shape)[1:]))
+    bound = (6 / (1 + a ** 2) / prod(argfix(*shape)[1:])) ** 0.5
     return Tensor.uniform(*shape, low=-bound, high=bound, **kwargs)
 
-  # https://pytorch.org/docs/stable/_modules/torch/nn/init.html#kaiming_normal_
   @staticmethod
   def kaiming_normal(*shape, a:float = 0.01, **kwargs) -> Tensor:
     """
@@ -978,7 +970,7 @@ class Tensor(OpMixin):
     print(Tensor.kaiming_normal(2, 3).numpy())
     ```
     """
-    std = math.sqrt(2.0 / (1 + a ** 2)) / math.sqrt(prod(argfix(*shape)[1:]))
+    std = (2 / (1 + a ** 2) / prod(argfix(*shape)[1:])) ** 0.5
     return Tensor.normal(*shape, mean=0.0, std=std, **kwargs)
 
   @staticmethod
@@ -1059,7 +1051,7 @@ class Tensor(OpMixin):
       else: t.grad.assign(t.grad + g.to(t.grad.device))
     return self
 
-  # ***** movement low level ops *****
+  # ***** movement ops *****
 
   def _mop(self, op:Ops, arg) -> Tensor: return self._apply_uop(UOp._mop, extra_args=(op,), arg=arg)
   def _rop(self, op:Ops, axis:tuple[int, ...]) -> Tensor: return self._apply_uop(UOp._rop, op=op, axis=axis)
@@ -1137,20 +1129,10 @@ class Tensor(OpMixin):
     if mode in {"reflect", "replicate"}: return self._pad_reflect_replicate(pX, mode)
     raise NotImplementedError(f"{mode=} is not supported")
 
-  # ***** movement high level ops *****
-
   def _getitem(self, indices, v: Tensor|None = None) -> Tensor:
     # wrap single index into a list
     if (isinstance(indices, list) and all_int(indices)) or not isinstance(indices, (tuple, list)): indices = [indices]
-    x, indices = self, list(indices)
-
-    # fill ellipsis or rest of indices with slice(None)
-    if len(ellipsis_idx := [dim for dim, i in enumerate(indices) if i is Ellipsis]) > 1: raise IndexError("indices can only have a single ellipsis")
-    # NOTE: None adds a dim later
-    num_indices = len(indices) - len(ellipsis_idx) - sum(1 for i in indices if i is None)
-    if num_indices > self.ndim: raise IndexError(f"too many {num_indices=} for {self.ndim=}")
-    fill_idx = ellipsis_idx[0] if ellipsis_idx else len(indices)
-    indices[fill_idx:fill_idx+1] = [slice(None)] * (self.ndim - num_indices)
+    x, indices = self, self._normalize_indices(list(indices))
 
     indices_parsed, dim = [], 0
     for index in indices:
@@ -2040,15 +2022,11 @@ class Tensor(OpMixin):
 
   def dot(self, w:Tensor, dtype:DTypeLike|None=None) -> Tensor:
     if IMAGE: return self.image_dot(w, dtype)
-    if ASM_GEMM:
-      from extra.gemm.cdna_asm_gemm import can_use_asm_gemm, asm_gemm
-      if can_use_asm_gemm(self, w): return asm_gemm(self, w)
     return super().dot(w, dtype=dtype)
 
-  def _cumalu(self, axis:int, op:Ops, _include_initial=False) -> Tensor:
+  def _cumalu(self, axis:int, op:Ops) -> Tensor:
     assert self.shape[axis] != 0 and op in (Ops.ADD, Ops.MAX, Ops.MUL)
-    pl_sz = self.shape[axis] - int(not _include_initial)
-    pooled = self.transpose(axis,-1).pad((pl_sz, -int(_include_initial)), value=identity_element(op, self.dtype))._pool((self.shape[axis],))
+    pooled = self.transpose(axis,-1).pad((self.shape[axis]-1, 0), value=identity_element(op, self.dtype))._pool((self.shape[axis],))
     return getattr(pooled, {Ops.ADD: "sum", Ops.MAX: "max", Ops.MUL: "prod"}[op])(-1).transpose(axis, -1)
 
   def _split_cumalu(self, axis:int, op:Ops) -> Tensor:
@@ -2057,9 +2035,10 @@ class Tensor(OpMixin):
     # TODO: someday the optimizer will find this on its own
     # for now this is a two stage cumsum
     SPLIT = 256
+    value = identity_element(op, self.dtype)
     if not isinstance(s:=self.shape[axis], int) or s <= SPLIT*2: return self._cumalu(axis, op)
-    ret = self.transpose(axis,-1).pad((round_up(s, SPLIT)-s, 0), value=identity_element(op, self.dtype)).unflatten(-1, (-1, SPLIT))._cumalu(-1, op)
-    base = ret[..., -1]._cumalu(-1, op, _include_initial=True)
+    ret = self.transpose(axis,-1).pad((round_up(s, SPLIT)-s, 0), value=value).unflatten(-1, (-1, SPLIT))._cumalu(-1, op)
+    base = ret[..., -1]._cumalu(-1, op).pad((1, -1), value=value)
     base = base.unsqueeze(-1).expand(*base.shape, ret.shape[-1])
     def fix(x: Tensor) -> Tensor: return x.flatten(start_dim=-2)[..., -s:].transpose(axis,-1)
     return getattr(fix(ret), {Ops.ADD: "add", Ops.MAX: "maximum", Ops.MUL: "mul"}[op])(fix(base))
@@ -2393,69 +2372,6 @@ class Tensor(OpMixin):
     """
     return self._apply_uop(UOp.contiguous_backward)
 
-  def logsigmoid(self) -> Tensor:
-    """
-    Applies the LogSigmoid function element-wise.
-
-    - See: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.logsigmoid.html
-
-    ```python exec="true" source="above" session="tensor" result="python"
-    print(Tensor([-3., -2., -1., 0., 1., 2., 3.]).logsigmoid().numpy())
-    ```
-    """
-    return -(-self).softplus()
-
-  # ***** math functions *****
-
-  def lerp(self, end:Tensor, weight:Tensor|float) -> Tensor:
-    """
-    Linearly interpolates between `self` and `end` by `weight`.
-
-    ```python exec="true" source="above" session="tensor" result="python"
-    print(Tensor([1., 2., 3.]).lerp(Tensor([4., 5., 6.]), 0.5).numpy())
-    ```
-    """
-    if self.dtype == dtypes.uint8 and isinstance(weight, Tensor):
-      w_i = (weight * (1<<(W_PREC:=7)) + 0.5).cast(dtypes.int16)
-      return (self+(((end - self).cast(dtypes.int8) * w_i + (1<<W_PREC-1)).cast(dtypes.uint16) >> W_PREC)).cast(dtypes.uint8)
-    return self + (end - self) * weight
-
-  # ***** activation functions *****
-
-  def selu(self, alpha=1.67326, gamma=1.0507) -> Tensor:
-    """
-    Applies the Scaled Exponential Linear Unit (SELU) function element-wise.
-
-    - Paper: https://arxiv.org/abs/1706.02515v5
-
-    ```python exec="true" source="above" session="tensor" result="python"
-    print(Tensor([-3., -2., -1., 0., 1., 2., 3.]).selu().numpy())
-    ```
-    """
-    return gamma * (self >= 0).where(self, alpha * (self.exp() - 1))
-
-  def mish(self) -> Tensor:
-    """
-    Applies the Mish function element-wise.
-
-    - Paper: https://arxiv.org/abs/1908.08681v3
-
-    ```python exec="true" source="above" session="tensor" result="python"
-    print(Tensor([-3., -2., -1., 0., 1., 2., 3.]).mish().numpy())
-    ```
-    """
-    return self * self.softplus().tanh()
-
-  def softplus(self, beta=1.0) -> Tensor:
-    """
-    Applies the Softplus function element-wise.
-
-    ```python exec="true" source="above" session="tensor" result="python"
-    print(Tensor([-3., -2., -1., 0., 1., 2., 3.]).softplus().numpy())
-    ```
-    """
-    return (1/beta) * (self*beta).logaddexp(0.0)
-
   # ***** broadcasted elementwise ops *****
 
   def ufix(self, x) -> Tensor:
@@ -2510,30 +2426,6 @@ class Tensor(OpMixin):
     """
     a, b = self._broadcasted(x, reverse)
     return a - a.div(b, rounding_mode="floor") * b
-
-  def lshift(self, x:Tensor|int, reverse=False) -> Tensor:
-    """
-    Computes left arithmetic shift of `self` by `x` bits. `self` must have unsigned dtype.
-    Equivalent to `self << x`.
-
-    ```python exec="true" source="above" session="tensor" result="python"
-    print(Tensor([1, 3, 31], dtype=dtypes.uint8).lshift(2).numpy())
-    ```
-    """
-    assert dtypes.is_unsigned(self.dtype) and isinstance(x, int) and x >= 0 and not reverse, f"not supported {self.dtype=} {x=}"
-    return self.mul(2 ** x, reverse)
-
-  def rshift(self, x:Tensor|int, reverse=False) -> Tensor:
-    """
-    Computes right arithmetic shift of `self` by `x` bits. `self` must have unsigned dtype.
-    Equivalent to `self >> x`.
-
-    ```python exec="true" source="above" session="tensor" result="python"
-    print(Tensor([4, 13, 125], dtype=dtypes.uint8).rshift(2).numpy())
-    ```
-    """
-    assert dtypes.is_unsigned(self.dtype) and isinstance(x, int) and x >= 0 and not reverse, f"not supported {self.dtype=} {x=}"
-    return self.idiv(2 ** x, reverse)
 
   def where(self:Tensor, x:Tensor|ConstType|sint, y:Tensor|ConstType|sint) -> Tensor:
     """
@@ -2724,14 +2616,6 @@ class Tensor(OpMixin):
     print(q.scaled_dot_product_attention(k, v).numpy())
     ```
     """
-    if getenv("FLASH_ATTENTION"):
-      from extra.thunder.tiny.fa import flash_attention
-      return flash_attention(self, key, value, attn_mask=attn_mask, is_causal=is_causal)
-
-    if getenv("HK_FLASH_ATTENTION"):
-      from extra.thunder.amd.fa import flash_attention
-      return flash_attention(self, key, value, attn_mask=attn_mask, is_causal=is_causal)
-
     # GQA: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
     if enable_gqa:
       key = key.repeat_interleave(int(self.shape[-3] // key.shape[-3]), dim=-3)

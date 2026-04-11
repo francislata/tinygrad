@@ -29,7 +29,7 @@ def call_gradient(ctx:UOp, k:UOp, needed:set[int]) -> tuple[UOp|None, ...]:
   assert fxn.op is Ops.TUPLE, f"expected TUPLE body for gradient, got {fxn.op}"
   params = {x.arg:x for x in fxn.toposort(enter_calls=False) if x.op == Ops.PARAM}
   grad_args = ctx.src
-  root_grad = UOp(Ops.TUPLE, src=tuple(fxn.src[i].const_like(0) if g.op is Ops.NOOP else g.param_like(len(args)+i) for i,g in enumerate(grad_args)))
+  root_grad = UOp(Ops.TUPLE, src=tuple(UOp(Ops.NOOP) if g.op is Ops.NOOP else g.param_like(len(args)+i) for i,g in enumerate(grad_args)))
   grads = compute_gradient(fxn, root_grad, set(params.values()))
   # for precompiled calls, substitute forward outputs with params so intermediates aren't recomputed
   fwd_subs = {src: src.param_like(len(args)+len(grad_args)+i) for i, src in enumerate(fxn.src)} if k.arg.precompile else {}
@@ -84,15 +84,15 @@ pm_gradient = PatternMatcher([
 def _deepwalk(root:UOp, targets:set[UOp]) -> tuple[list[UOp], dict[UOp, bool]]:
   # compute the target path (top down)
   in_target_path: dict[UOp, bool] = {}
-  for u in root.toposort(): in_target_path[u] = any(x in targets or in_target_path[x] for x in u.src)
+  root.topovisit(lambda u: any(in_target_path[x] or x in targets for x in u.src), in_target_path)
   # don't flow through DETACH or anything not in target path
-  return list(root.toposort(lambda node: node.op is not Ops.DETACH and in_target_path[node])), in_target_path
+  return [node for node in in_target_path if node.op is not Ops.DETACH and in_target_path[node]], in_target_path
 
 def compute_gradient(root:UOp, root_grad:UOp, targets:set[UOp]) -> dict[UOp, UOp]:
   walk, in_target_path = _deepwalk(root, targets)
   grads: dict[UOp, UOp] = {root: root_grad}
   for t0 in reversed(walk):
-    if t0 not in grads: continue
+    if t0 not in grads or grads[t0].op is Ops.NOOP: continue
     # GETTUPLE: accumulate gradient into a TUPLE UOp on the CALL, process when we hit the CALL
     if t0.op is Ops.GETTUPLE:
       k = t0.src[0]  # the CALL
@@ -112,7 +112,7 @@ def compute_gradient(root:UOp, root_grad:UOp, targets:set[UOp]) -> dict[UOp, UOp
     assert len(lgrads) == len(t0.src), f"got {len(lgrads)} gradient, expected {len(t0.src)}"
     for k,v in zip(t0.src, lgrads):
       if v is None: continue
-      if k in grads: grads[k] = grads[k] + v
+      if k in grads and grads[k].op is not Ops.NOOP: grads[k] = grads[k] + v
       else: grads[k] = v
       if len(forward_metadata:=all_metadata.get(t0, ())):
         backward_metadata = tuple(dataclasses.replace(x, backward=True) for x in forward_metadata)
