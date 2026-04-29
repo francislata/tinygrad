@@ -92,6 +92,20 @@ class TestJit(unittest.TestCase):
       np.testing.assert_allclose(e.numpy(), a.numpy()*b.numpy(), atol=1e-4, rtol=1e-5)
     assert_jit_cache_len(f, 3)
 
+  def test_global_counters_jit(self):
+    @TinyJit
+    def f(a, b):
+      c = (a + b).realize()
+      d = (c * 2).realize()
+      return (d - a).realize()
+    a, b = Tensor.randn(64, 64).realize(), Tensor.randn(64, 64).realize()
+    for _ in range(4):
+      GlobalCounters.reset()
+      f(a, b)
+      Device[a.device].synchronize()
+      self.assertGreater(GlobalCounters.global_mem, 0)
+      self.assertGreater(GlobalCounters.global_ops, 0)
+
   def test_nothing_jitted(self):
     @TinyJit
     def add(a, b): return None
@@ -706,7 +720,7 @@ class TestJitGraphSplit(unittest.TestCase):
         inner_cnt = len(ast.src[0].src)
         assert inner_cnt == expected["cnt"], f"Expected {expected['cnt']} operations in graph, got {inner_cnt}"
       elif expected["type"] == "comp":
-        assert ast.op in (Ops.SINK, Ops.PROGRAM, Ops.BEAM), f"Expected kernel, got {ast.op}"
+        assert ast.op in (Ops.SINK, Ops.PROGRAM), f"Expected kernel, got {ast.op}"
       elif expected["type"] in ("copy", "xfer"):
         assert ast.op is Ops.COPY, f"Expected COPY, got {ast.op}"
 
